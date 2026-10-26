@@ -7,6 +7,22 @@ adjusts the current theme's transparency (0–100%) and can restore **Follow the
 The existing renderer observes `theme-preferences.json`; authored alpha is used
 when there is no local override, with 30% as the default.
 
+Chat bubble styling is a separate tray entry: **Chat bubble colors**. Choose
+**Follow theme**, a built-in preset, or **Edit custom colors…** to set foreground
+and background colors (`#RRGGBB`), background transparency (0–100%), and backdrop
+blur (0–64px). Only the background becomes transparent or blurred; text stays
+sharp. These settings live in `bubble-preferences.json`, independently of the
+manager's overall transparency. An independent preset or custom selection stays
+selected when themes change. **Follow theme** uses the theme's optional
+`chatBubbles` style; older themes keep their existing message appearance.
+
+The tray uses the shared `assets/chat-bubbles.mjs` validator and atomic writer
+through the same validated Node.js runtime as other theme operations. It does
+not alter Codex message grouping or folding. Windows manual acceptance includes
+preset selection, all four custom fields, invalid hex input, cancel without
+writing, switching themes while a preset is selected, and returning to Follow
+theme without changing overall transparency or wallpaper.
+
 Select an inactive saved theme and choose **Move to Recycle Bin…** to remove its
 local directory after confirmation. The active theme must be switched from the
 existing tray first. Source ZIPs, active snapshots and recovery files are kept.

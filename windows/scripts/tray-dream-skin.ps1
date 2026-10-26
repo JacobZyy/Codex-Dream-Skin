@@ -232,6 +232,162 @@ try {
     }
   }
 
+  function Invoke-DreamSkinTrayBubbleCommand {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    $helper = Join-Path $SkillRoot 'assets\chat-bubbles.mjs'
+    Assert-DreamSkinNoReparseComponents -Path $helper
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
+      throw (Get-DreamSkinTrayText -Key 'BubbleHelperMissing')
+    }
+    $node = Get-DreamSkinNodeRuntime
+    $commandArguments = @($helper) + $Arguments + @('--preferences', (Join-Path $StateRoot 'bubble-preferences.json'))
+    if ($Arguments[0] -ceq 'get') {
+      $themePath = Join-Path $paths.Active 'theme.json'
+      if (Test-Path -LiteralPath $themePath -PathType Leaf) { $commandArguments += @('--theme', $themePath) }
+    }
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+      # Windows PowerShell 5.1 must decode the helper's UTF-8 preset names.
+      [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+      $result = Invoke-DreamSkinTrayThemeOperation -Action {
+        Invoke-DreamSkinNative -FilePath $node.Path -ArgumentList $commandArguments -SeparateStderr
+      }
+    } finally {
+      [Console]::OutputEncoding = $previousEncoding
+    }
+    if ($result.ExitCode -ne 0) {
+      $detail = ($result.ErrorOutput -join "`n").Trim()
+      throw ((Get-DreamSkinTrayText -Key 'BubbleSaveFailed') + $(if ($detail) { "`n$detail" }))
+    }
+    if ($Arguments[0] -ceq 'get') {
+      return ($result.Output -join "`n") | ConvertFrom-Json -ErrorAction Stop
+    }
+  }
+
+  function Show-DreamSkinBubbleEditor {
+    $configuration = Invoke-DreamSkinTrayBubbleCommand -Arguments @('get')
+    $style = $configuration.effectiveStyle
+    if ($null -eq $style) { $style = @($configuration.presets)[0].style }
+    $dialog = [System.Windows.Forms.Form]::new()
+    $dialog.Text = Get-DreamSkinTrayText -Key 'BubbleCustom'
+    $dialog.Font = [System.Drawing.Font]::new('Segoe UI', 10)
+    $dialog.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+    $dialog.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $dialog.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $dialog.MinimizeBox = $false
+    $dialog.MaximizeBox = $false
+    $dialog.ClientSize = [System.Drawing.Size]::new(510, 305)
+    $layout = [System.Windows.Forms.TableLayoutPanel]::new()
+    $layout.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $layout.Padding = [System.Windows.Forms.Padding]::new(20)
+    $layout.ColumnCount = 2
+    $layout.RowCount = 6
+    [void]$layout.ColumnStyles.Add([System.Windows.Forms.ColumnStyle]::new([System.Windows.Forms.SizeType]::Percent, 55))
+    [void]$layout.ColumnStyles.Add([System.Windows.Forms.ColumnStyle]::new([System.Windows.Forms.SizeType]::Percent, 45))
+    $foreground = [System.Windows.Forms.TextBox]::new()
+    $foreground.Text = $style.foreground
+    $background = [System.Windows.Forms.TextBox]::new()
+    $background.Text = $style.background
+    $transparency = [System.Windows.Forms.NumericUpDown]::new()
+    $transparency.Maximum = 100
+    $transparency.DecimalPlaces = 1
+    $transparency.Value = [decimal]$style.transparency
+    $blur = [System.Windows.Forms.NumericUpDown]::new()
+    $blur.Maximum = 64
+    $blur.DecimalPlaces = 1
+    $blur.Value = [decimal]$style.blur
+    $fields = @(
+      @{ Key = 'BubbleForeground'; Control = $foreground },
+      @{ Key = 'BubbleBackground'; Control = $background },
+      @{ Key = 'BubbleTransparency'; Control = $transparency },
+      @{ Key = 'BubbleBlur'; Control = $blur }
+    )
+    for ($index = 0; $index -lt $fields.Count; $index++) {
+      $label = [System.Windows.Forms.Label]::new()
+      $label.Text = Get-DreamSkinTrayText -Key $fields[$index].Key
+      $label.AutoSize = $true
+      $label.Anchor = [System.Windows.Forms.AnchorStyles]::Left
+      $fields[$index].Control.Dock = [System.Windows.Forms.DockStyle]::Fill
+      $fields[$index].Control.AccessibleName = $label.Text
+      $layout.Controls.Add($label, 0, $index)
+      $layout.Controls.Add($fields[$index].Control, 1, $index)
+    }
+    $hint = [System.Windows.Forms.Label]::new()
+    $hint.Text = Get-DreamSkinTrayText -Key 'BubbleScopeHint'
+    $hint.AutoSize = $true
+    $hint.MaximumSize = [System.Drawing.Size]::new(465, 0)
+    $hint.Margin = [System.Windows.Forms.Padding]::new(0, 10, 0, 10)
+    $layout.Controls.Add($hint, 0, 4)
+    $layout.SetColumnSpan($hint, 2)
+    $buttons = [System.Windows.Forms.FlowLayoutPanel]::new()
+    $buttons.AutoSize = $true
+    $buttons.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $buttons.FlowDirection = [System.Windows.Forms.FlowDirection]::RightToLeft
+    $save = [System.Windows.Forms.Button]::new()
+    $save.Text = Get-DreamSkinTrayText -Key 'BubbleSave'
+    $save.AutoSize = $true
+    $cancel = [System.Windows.Forms.Button]::new()
+    $cancel.Text = Get-DreamSkinTrayText -Key 'BubbleCancel'
+    $cancel.AutoSize = $true
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $buttons.Controls.Add($cancel)
+    $buttons.Controls.Add($save)
+    $layout.Controls.Add($buttons, 0, 5)
+    $layout.SetColumnSpan($buttons, 2)
+    $dialog.Controls.Add($layout)
+    $dialog.AcceptButton = $save
+    $dialog.CancelButton = $cancel
+    $save.add_Click({
+      try {
+        if ($foreground.Text -cnotmatch '^#[0-9A-Fa-f]{6}$' -or $background.Text -cnotmatch '^#[0-9A-Fa-f]{6}$') {
+          throw (Get-DreamSkinTrayText -Key 'BubbleInvalidColor')
+        }
+        Invoke-DreamSkinTrayBubbleCommand -Arguments @(
+          'custom', '--foreground', $foreground.Text, '--background', $background.Text,
+          '--transparency', $transparency.Value.ToString([System.Globalization.CultureInfo]::InvariantCulture),
+          '--blur', $blur.Value.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+        )
+        $dialog.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $dialog.Close()
+      } catch { Show-DreamSkinTrayError -Message $_.Exception.Message }
+    }.GetNewClosure())
+    try { [void]$dialog.ShowDialog() } finally { $dialog.Dispose() }
+  }
+
+  function Add-DreamSkinTrayBubbleMenu {
+    $bubbleMenu = [System.Windows.Forms.ToolStripMenuItem]::new((Get-DreamSkinTrayText -Key 'BubbleColors'))
+    try {
+      $configuration = Invoke-DreamSkinTrayBubbleCommand -Arguments @('get')
+      if (@($configuration.warnings).Count -gt 0) {
+        $warning = $configuration.warnings -join "`n"
+        $null = Add-DreamSkinTrayItem -Items $bubbleMenu.DropDownItems -Text (Get-DreamSkinTrayText -Key 'BubbleWarnings') `
+          -Action ({ Show-DreamSkinTrayError -Message $warning }.GetNewClosure())
+      }
+      $null = Add-DreamSkinTrayItem -Items $bubbleMenu.DropDownItems -Text (Get-DreamSkinTrayText -Key 'BubbleFollowTheme') `
+        -Checked ($configuration.preferences.mode -ceq 'theme') -Action {
+          Invoke-DreamSkinTrayBubbleCommand -Arguments @('theme')
+        }
+      [void]$bubbleMenu.DropDownItems.Add([System.Windows.Forms.ToolStripSeparator]::new())
+      foreach ($preset in $configuration.presets) {
+        $presetId = $preset.id
+        $presetName = if ((Resolve-DreamSkinLanguage -StateRoot $StateRoot) -ceq 'en-US' -and $preset.nameEn) { $preset.nameEn } else { $preset.name }
+        $presetAction = { Invoke-DreamSkinTrayBubbleCommand -Arguments @('preset', $presetId) }.GetNewClosure()
+        $null = Add-DreamSkinTrayItem -Items $bubbleMenu.DropDownItems -Text $presetName -Action $presetAction `
+          -Checked ($configuration.preferences.mode -ceq 'preset' -and $configuration.preferences.presetId -ceq $presetId)
+      }
+      [void]$bubbleMenu.DropDownItems.Add([System.Windows.Forms.ToolStripSeparator]::new())
+      $customSelected = $configuration.preferences.mode -ceq 'preset' -and
+        $configuration.preferences.presetId -cnotin @($configuration.presets | ForEach-Object { $_.id })
+      $null = Add-DreamSkinTrayItem -Items $bubbleMenu.DropDownItems -Text (Get-DreamSkinTrayText -Key 'BubbleCustom') `
+        -Checked $customSelected -Action { Show-DreamSkinBubbleEditor }
+    } catch {
+      $message = $_.Exception.Message
+      $null = Add-DreamSkinTrayItem -Items $bubbleMenu.DropDownItems -Text (Get-DreamSkinTrayText -Key 'BubbleReadFailed') `
+        -Action ({ Show-DreamSkinTrayError -Message $message }.GetNewClosure())
+    }
+    [void]$menu.Items.Add($bubbleMenu)
+  }
+
   function Set-DreamSkinAutoStart {
     param([Parameter(Mandatory = $true)][bool]$Enabled)
     if (-not $Enabled) {
@@ -399,6 +555,7 @@ try {
       }
     }
     [void]$menu.Items.Add($savedMenu)
+    Add-DreamSkinTrayBubbleMenu
 
     $null = Add-DreamSkinTrayItem -Items $menu.Items -Text (Get-DreamSkinTrayText -Key 'OpenThemes') -Action {
       $themeDirectoryToken = ConvertTo-DreamSkinProcessArgument -Value $paths.Saved

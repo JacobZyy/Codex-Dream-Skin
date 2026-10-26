@@ -18,6 +18,7 @@ runtime/*
 !runtime/safe-css-validator.mjs
 !runtime/theme-package-validator.mjs
 !runtime/theme-preferences.mjs
+!runtime/chat-bubbles.mjs
 !runtime/validate-safe-css-file.mjs
 
 # local agent context

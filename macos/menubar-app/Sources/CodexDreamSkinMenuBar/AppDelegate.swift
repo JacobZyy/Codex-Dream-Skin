@@ -26,6 +26,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
   private var transparencySlider: NSSlider?
   private var transparencyLabel: NSTextField?
   private var transparencyResetItem: NSMenuItem?
+  private var chatBubbleConfiguration: ChatBubbleConfiguration?
+  private var chatBubbleReadError = false
+  private var chatBubbleRefreshRunning = false
+  private var chatBubbleReadGeneration = 0
   private var statusRefreshRunning = false
   private var operationInFlight = false
   private var engineInstallInFlight = false
@@ -50,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     "assets/selectors.json",
     "assets/theme-package-validator.mjs",
     "assets/theme-preferences.mjs",
+    "assets/chat-bubbles.mjs",
     "assets/theme.json",
     "presets/preset-gothic-void-crusade/background.jpg",
     "presets/preset-gothic-void-crusade/theme.json",
@@ -132,6 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     migrateLegacySwiftBarIfNeeded()
     installBundledEngineIfNeeded(force: false)
     refreshStatus()
+    refreshChatBubbleConfiguration()
     refreshTimer = Timer.scheduledTimer(
       timeInterval: 10,
       target: self,
@@ -189,6 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
   func menuNeedsUpdate(_ menu: NSMenu) {
     rebuildMenu()
     refreshStatus()
+    refreshChatBubbleConfiguration()
   }
 
   func menuWillOpen(_ menu: NSMenu) {
@@ -334,6 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     menu.addItem(.separator())
     addThemeMenu(enabled: !busy)
+    addChatBubbleMenu(enabled: !busy)
     addLinksMenu()
 
     menu.addItem(.separator())
@@ -441,6 +449,169 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
   @objc private func resetTransparency() {
     saveTransparency(nil)
+  }
+
+  private var chatBubblePreferencesURL: URL {
+    stateRootURL.appendingPathComponent("bubble-preferences.json")
+  }
+
+  private func refreshChatBubbleConfiguration() {
+    guard !chatBubbleRefreshRunning, !operationInFlight, !engineInstallInFlight,
+          fileManager.fileExists(atPath: installedEngineURL.appendingPathComponent("assets/chat-bubbles.mjs").path) else {
+      return
+    }
+    chatBubbleRefreshRunning = true
+    let generation = chatBubbleReadGeneration
+    let activeTheme = stateRootURL.appendingPathComponent("theme/theme.json")
+    ScriptRunner.runChatBubbles(
+      engine: installedEngineURL,
+      preferences: chatBubblePreferencesURL,
+      theme: fileManager.fileExists(atPath: activeTheme.path) ? activeTheme : nil,
+      command: ["get"]
+    ) { [weak self] result in
+      guard let self else { return }
+      self.chatBubbleRefreshRunning = false
+      guard generation == self.chatBubbleReadGeneration else {
+        self.refreshChatBubbleConfiguration()
+        return
+      }
+      do {
+        guard result.succeeded else { throw CocoaError(.fileReadCorruptFile) }
+        self.chatBubbleConfiguration = try ChatBubbleConfiguration.decode(Data(result.output.utf8))
+        self.chatBubbleReadError = false
+      } catch {
+        self.chatBubbleConfiguration = nil
+        self.chatBubbleReadError = true
+        NSLog("[DreamSkin] chat bubble preferences could not be read")
+      }
+      self.rebuildMenu()
+    }
+  }
+
+  private func addChatBubbleMenu(enabled: Bool) {
+    let chinese = copy.resolvedLanguage == .chinese
+    let title = chinese ? "聊天气泡配色" : "Chat bubble colors"
+    let root = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+    let submenu = NSMenu(title: title)
+    submenu.autoenablesItems = false
+    root.submenu = submenu
+    menu.addItem(root)
+    guard let configuration = chatBubbleConfiguration else {
+      let unavailable = chinese ? "配色设置读取失败，请检查引擎和设置文件" : "Could not read colors; check the engine and settings"
+      addDisabledItem(chatBubbleReadError ? unavailable : (chinese ? "正在读取配色…" : "Loading colors…"), to: submenu)
+      return
+    }
+    let following = configuration.preferences.mode == .theme
+    let selectedPreset = configuration.presets.first { $0.id == configuration.preferences.presetId }
+    let follow = addActionItem(chinese ? "跟随主题" : "Follow theme", action: #selector(followThemeChatBubbles), enabled: enabled, to: submenu)
+    follow.state = following ? .on : .off
+    if following {
+      addDisabledItem(chinese ? "当前：跟随主题" : "Current: follow theme", to: submenu)
+    } else {
+      let name = (chinese ? selectedPreset?.name : selectedPreset?.nameEn ?? selectedPreset?.name) ?? (chinese ? "自定义" : "Custom")
+      addDisabledItem((chinese ? "当前独立配色：" : "Current independent colors: ") + cleanMenuText(name), to: submenu)
+    }
+    if let style = configuration.effectiveStyle {
+      addDisabledItem("\(style.foreground) / \(style.background)", to: submenu)
+      addDisabledItem(chinese
+        ? "背景透明度 \(style.transparency.formatted())% · 模糊 \(style.blur.formatted())px"
+        : "Background transparency \(style.transparency.formatted())% · Blur \(style.blur.formatted())px", to: submenu)
+    } else {
+      addDisabledItem(chinese ? "主题未提供独立气泡配色，保留主题样式" : "No theme bubble palette; retain the theme styling", to: submenu)
+    }
+    for warning in configuration.warnings {
+      addDisabledItem(cleanMenuText(warning), to: submenu)
+    }
+    submenu.addItem(.separator())
+    for preset in configuration.presets {
+      let name = chinese ? preset.name : preset.nameEn ?? preset.name
+      let item = addActionItem(cleanMenuText(name), action: #selector(selectChatBubblePreset(_:)), enabled: enabled, to: submenu)
+      item.representedObject = preset.id
+      item.state = !following && configuration.preferences.presetId == preset.id ? .on : .off
+    }
+    submenu.addItem(.separator())
+    let custom = addActionItem(chinese ? "自定义配色…" : "Custom colors…", action: #selector(customizeChatBubbles), enabled: enabled, to: submenu)
+    custom.state = !following && selectedPreset == nil ? .on : .off
+  }
+
+  @objc private func followThemeChatBubbles() {
+    saveChatBubbleConfiguration(command: ["theme"])
+  }
+
+  @objc private func selectChatBubblePreset(_ sender: NSMenuItem) {
+    guard let id = sender.representedObject as? String,
+          chatBubbleConfiguration?.presets.contains(where: { $0.id == id }) == true else { return }
+    saveChatBubbleConfiguration(command: ["preset", id])
+  }
+
+  @objc private func customizeChatBubbles() {
+    guard let configuration = chatBubbleConfiguration,
+          let initial = configuration.effectiveStyle ?? configuration.preferences.style ?? configuration.presets.first?.style else { return }
+    let chinese = copy.resolvedLanguage == .chinese
+    let alert = NSAlert()
+    alert.messageText = chinese ? "自定义聊天气泡配色" : "Custom chat bubble colors"
+    alert.informativeText = chinese
+      ? "仅改变消息气泡。透明度只影响背景，文字保持清晰。保存后使用独立配色，可随时切回跟随主题。"
+      : "Only message bubbles change. Transparency affects the background; text stays clear. Save to use independent colors, or switch back to Follow theme."
+    alert.addButton(withTitle: chinese ? "保存" : "Save")
+    alert.addButton(withTitle: chinese ? "取消" : "Cancel")
+    let fields = [initial.foreground, initial.background, String(initial.transparency), String(initial.blur)].map { NSTextField(string: $0) }
+    let labels = chinese
+      ? ["前景色 #RRGGBB", "背景色 #RRGGBB", "背景透明度 0–100%", "高斯模糊 0–64px"]
+      : ["Foreground #RRGGBB", "Background #RRGGBB", "Transparency 0–100%", "Gaussian blur 0–64px"]
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: 350, height: 142))
+    for (index, field) in fields.enumerated() {
+      let y = 108 - index * 34
+      let label = NSTextField(labelWithString: labels[index])
+      label.frame = NSRect(x: 0, y: y + 2, width: 190, height: 20)
+      field.frame = NSRect(x: 194, y: y, width: 150, height: 24)
+      field.setAccessibilityLabel(labels[index])
+      view.addSubview(label)
+      view.addSubview(field)
+    }
+    alert.accessoryView = view
+    activateForUserInteraction()
+    while alert.runModal() == .alertFirstButtonReturn {
+      do {
+        let values = fields.map { $0.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard let transparency = Double(values[2]), let blur = Double(values[3]) else {
+          throw CocoaError(.fileReadCorruptFile)
+        }
+        let style = try ChatBubbleStyle(foreground: values[0], background: values[1], transparency: transparency, blur: blur)
+        saveChatBubbleConfiguration(command: style.customCommand)
+        return
+      } catch {
+        alert.informativeText = chinese
+          ? "颜色须为 #RRGGBB；背景透明度须为 0–100，模糊须为 0–64px。请修改后保存。"
+          : "Use #RRGGBB colors, transparency from 0 to 100, and blur from 0 to 64px. Correct the values and save again."
+      }
+    }
+  }
+
+  private func saveChatBubbleConfiguration(command: [String]) {
+    guard !operationInFlight, !engineInstallInFlight, !themeRecoveryInFlight, !snapshot.busy else { return }
+    chatBubbleReadGeneration += 1
+    operationInFlight = true
+    rebuildMenu()
+    ScriptRunner.runChatBubbles(
+      engine: installedEngineURL,
+      preferences: chatBubblePreferencesURL,
+      command: command
+    ) { [weak self] result in
+      guard let self else { return }
+      self.operationInFlight = false
+      guard result.succeeded else {
+        self.rebuildMenu()
+        let chinese = self.copy.resolvedLanguage == .chinese
+        self.showError(title: chinese ? "无法保存聊天气泡配色" : "Could not save chat bubble colors",
+                       message: self.conciseOutput(result.output, fallback: chinese ? "设置未保存，请重试。" : "Settings were not saved. Try again."))
+        return
+      }
+      // Read with the active theme so following mode never displays the saved override as active.
+      self.chatBubbleConfiguration = nil
+      self.refreshChatBubbleConfiguration()
+      self.rebuildMenu()
+    }
   }
 
   private func addLinksMenu() {

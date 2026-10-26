@@ -221,6 +221,35 @@ try {
     assert.equal(JSON.parse(checked.stdout).pass, true, "Studio taskMode=full must pass both payload validators");
   }
 
+  const bubbleStyle = { foreground: "#BECDE5", background: "#344862", transparency: 25, blur: 24 };
+  const bubblePackage = await makeOfficial("official-chat-bubbles", {
+    mutateTheme: (theme) => { theme.chatBubbles = bubbleStyle; },
+  });
+  for (const platform of ["macos", "windows"]) {
+    const result = await validate(bubblePackage.source, platform, `chat-bubbles-${platform}`);
+    const staged = JSON.parse(await fs.readFile(path.join(result.stage, "theme.json"), "utf8"));
+    assert.deepEqual(staged.chatBubbles, bubbleStyle, "Import must preserve authored bubble defaults");
+    assert.equal(Object.hasOwn(staged, "resolvedChatBubbles"), false, "Local overrides must not enter a theme package");
+  }
+  for (const [name, value] of [["partial", { foreground: "#123456" }],
+    ["alpha", { ...bubbleStyle, background: "#12345680" }],
+    ["range", { ...bubbleStyle, transparency: 101 }],
+    ["unknown", { ...bubbleStyle, userOverride: true }], ["null", null]]) {
+    const invalid = await makeOfficial(`invalid-chat-bubbles-${name}`, {
+      mutateTheme: (theme) => { theme.chatBubbles = value; },
+    });
+    await expectRejected(invalid.source, "macos", /chatBubbles/, `invalid-chat-bubbles-${name}`);
+    const simple = path.join(tempRoot, `simple-chat-bubbles-${name}`);
+    await fs.mkdir(simple);
+    for (const file of ["theme.json", "theme.css", "background.png"]) {
+      await fs.copyFile(path.join(invalid.source, file), path.join(simple, file));
+    }
+    await expectRejected(simple, "windows", /chatBubbles/, `simple-chat-bubbles-${name}`);
+  }
+  const privatePreferencesPackage = await makeOfficial("private-bubble-preferences");
+  await fs.writeFile(path.join(privatePreferencesPackage.source, "bubble-preferences.json"), "{}");
+  await expectRejected(privatePreferencesPackage.source, "macos", /unregistered file/, "private-bubble-preferences");
+
   const boundaryColors = {
     background: "#abc",
     panel: "#abcd",

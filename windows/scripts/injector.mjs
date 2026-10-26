@@ -1,5 +1,9 @@
 import fs from "node:fs/promises";
 import { readThemeTransparency, themePreferencesPath } from "../assets/theme-preferences.mjs";
+import {
+  chatBubblePreferencesPath, normalizeChatBubbleStyle,
+  readChatBubblePreferences, resolveChatBubbleStyle,
+} from "../assets/chat-bubbles.mjs";
 import { constants as fsConstants } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -592,6 +596,13 @@ export async function loadTheme(themeDir, preferenceOptions = {}) {
   };
   const userTransparency = await readThemeTransparency(theme.id, { preferencesPath: themePreferencesPath("win32"), ...preferenceOptions });
   if (userTransparency !== undefined) theme.userTransparency = userTransparency;
+  if (raw.chatBubbles !== undefined) theme.chatBubbles = normalizeChatBubbleStyle(raw.chatBubbles, "chatBubbles");
+  const bubblePreferences = await readChatBubblePreferences({
+    preferencesPath: preferenceOptions.chatBubblePreferencesPath ?? chatBubblePreferencesPath("win32"),
+    warn: preferenceOptions.warn,
+  });
+  const resolvedChatBubbles = resolveChatBubbleStyle(theme.chatBubbles, bubblePreferences);
+  if (resolvedChatBubbles) theme.resolvedChatBubbles = resolvedChatBubbles;
   const [themeStat, imageStat, safeCss] = await Promise.all([
     fs.stat(themePath),
     fs.stat(realImagePath),
@@ -613,7 +624,9 @@ export async function loadTheme(themeDir, preferenceOptions = {}) {
   theme.artMetadata = artMetadata;
   const fingerprint = createHash("sha256")
     .update(themeText, "utf8")
-    .update(JSON.stringify({ userTransparency: theme.userTransparency }))
+    .update(JSON.stringify({
+      userTransparency: theme.userTransparency, resolvedChatBubbles: theme.resolvedChatBubbles,
+    }))
     .update("\0")
     .update(imageBytes)
     .update("\0")
@@ -1619,6 +1632,14 @@ async function runWatch(options) {
               preferencesPath: themePreferencesPath("win32"),
             });
             shouldAudit = userTransparency !== loadedPayload.theme.userTransparency;
+          }
+          if (!shouldAudit) {
+            const bubblePreferences = await readChatBubblePreferences({
+              preferencesPath: chatBubblePreferencesPath("win32"),
+            });
+            const resolvedChatBubbles = resolveChatBubbleStyle(loadedPayload.theme.chatBubbles, bubblePreferences);
+            shouldAudit = JSON.stringify(resolvedChatBubbles)
+              !== JSON.stringify(loadedPayload.theme.resolvedChatBubbles);
           }
           if (!shouldAudit) {
             try {

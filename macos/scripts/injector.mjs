@@ -1,5 +1,9 @@
 import fs from "node:fs/promises";
 import { readThemeTransparency, themePreferencesPath } from "../assets/theme-preferences.mjs";
+import {
+  chatBubblePreferencesPath, normalizeChatBubbleStyle,
+  readChatBubblePreferences, resolveChatBubbleStyle,
+} from "../assets/chat-bubbles.mjs";
 import { constants as fsConstants, watch as watchFs } from "node:fs";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -733,6 +737,13 @@ export async function loadTheme(themeDir, preferenceOptions = {}) {
   };
   const userTransparency = await readThemeTransparency(theme.id, { preferencesPath: themePreferencesPath("darwin"), ...preferenceOptions });
   if (userTransparency !== undefined) theme.userTransparency = userTransparency;
+  if (raw.chatBubbles !== undefined) theme.chatBubbles = normalizeChatBubbleStyle(raw.chatBubbles, "chatBubbles");
+  const bubblePreferences = await readChatBubblePreferences({
+    preferencesPath: preferenceOptions.chatBubblePreferencesPath ?? chatBubblePreferencesPath("darwin"),
+    warn: preferenceOptions.warn,
+  });
+  const resolvedChatBubbles = resolveChatBubbleStyle(theme.chatBubbles, bubblePreferences);
+  if (resolvedChatBubbles) theme.resolvedChatBubbles = resolvedChatBubbles;
   if (appearance !== undefined) theme.appearance = appearance;
   if (Object.values(art).some((value) => value !== undefined)) {
     theme.art = Object.fromEntries(Object.entries(art).filter(([, value]) => value !== undefined));
@@ -1548,9 +1559,14 @@ export function earlyPayloadFor(payload, revision) {
   })()`;
 }
 
-function watchPayloadSources(themeDir, onDirty) {
+export function watchPayloadSources(themeDir, onDirty, preferenceOptions = {}) {
   const assetsRoot = path.join(root, "assets");
   const themeRoot = themeDir ?? assetsRoot;
+  const preferencePaths = [
+    preferenceOptions.preferencesPath ?? themePreferencesPath("darwin"),
+    preferenceOptions.chatBubblePreferencesPath ?? chatBubblePreferencesPath("darwin"),
+  ];
+  const preferenceNames = new Set(preferencePaths.map((file) => path.basename(file)));
   const watchers = [];
   const add = (directory, kind) => {
     let watcher;
@@ -1560,7 +1576,7 @@ function watchPayloadSources(themeDir, onDirty) {
         const staticChanged = directory === assetsRoot &&
           (!name || name === "dream-skin.css" || name === "renderer-inject.js");
         if (kind === "static" && !staticChanged) return;
-        if (kind === "preferences" && name && name !== "theme-preferences.json") return;
+        if (kind === "preferences" && name && !preferenceNames.has(name)) return;
         onDirty({ staticChanged });
       });
       watcher.on("error", (error) => {
@@ -1572,7 +1588,9 @@ function watchPayloadSources(themeDir, onDirty) {
     }
   };
   add(themeRoot, "theme");
-  add(path.dirname(themePreferencesPath("darwin")), "preferences");
+  for (const directory of new Set(preferencePaths.map((file) => path.dirname(file)))) {
+    add(directory, "preferences");
+  }
   if (themeRoot !== assetsRoot) add(assetsRoot, "static");
   return () => watchers.forEach((watcher) => watcher.close());
 }

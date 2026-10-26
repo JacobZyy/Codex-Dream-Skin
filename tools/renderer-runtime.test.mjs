@@ -92,6 +92,10 @@ function makeFixture({
           candidate !== node && node.contains(candidate) && candidate.matches?.(selector),
         ) || null;
       },
+      querySelectorAll(selector) {
+        return [...domNodes].filter((candidate) => candidate !== node && node.contains(candidate)
+          && selector.split(",").some((part) => candidate.matches?.(part.trim())));
+      },
     };
     domNodes.add(node);
     return node;
@@ -179,8 +183,9 @@ function makeFixture({
       new Map([["data-local-conversation-user-anchor", "true"]]),
     );
     partFixtures.userMessageBubble = makeDomNode(
-      "user-message-bubble", partFixtures.userMessage, new Map(),
-      ['[class*="max-w-"][class*="rounded-2xl"][class*="text-start"]'],
+      "user-message-bubble", partFixtures.userMessage,
+      new Map([["data-user-message-bubble", "true"]]),
+      ['[data-user-message-bubble]', '[class*="max-w-"][class*="rounded-2xl"][class*="text-start"]'],
     );
     partFixtures.assistantMessage = makeDomNode(
       "assistant-message", partFixtures.thread,
@@ -203,6 +208,26 @@ function makeFixture({
     if (modernMessages) {
       register(messageSelector, partFixtures.userMessage);
       register(messageSelector, partFixtures.assistantMessage);
+      const activitySelector = '[data-response-annotation-conversation][data-response-annotation-target]';
+      const toolSelector = '[data-local-conversation-item-target-ids]';
+      partFixtures.steeringWrapper = makeDomNode(
+        "steering-wrapper", partFixtures.thread,
+        new Map([["data-local-conversation-item-target-ids", "steering"]]), [toolSelector],
+      );
+      partFixtures.steeringBubble = makeDomNode(
+        "steering-bubble", partFixtures.steeringWrapper,
+        new Map([["data-user-message-bubble", "true"]]), ['[data-user-message-bubble]'],
+      );
+      partFixtures.processMessage = makeDomNode("process-message", partFixtures.thread,
+        new Map([["data-response-annotation-conversation", "test"], ["data-response-annotation-target", "process"]]),
+        [activitySelector]);
+      partFixtures.toolMessage = makeDomNode("tool-message", partFixtures.thread,
+        new Map([["data-local-conversation-item-target-ids", "tool"]]), [toolSelector]);
+      partFixtures.nestedProcess = makeDomNode("nested-process", partFixtures.assistantMessage,
+        new Map([["data-response-annotation-conversation", "test"], ["data-response-annotation-target", "nested"]]),
+        [activitySelector]);
+      partFixtures.nestedTool = makeDomNode("nested-tool", partFixtures.nestedProcess,
+        new Map([["data-local-conversation-item-target-ids", "nested-tool"]]), [toolSelector]);
     }
     register(':is(.composer-surface-chrome, [class*="_ComposerLayoutRoot_"], [data-composer-surface-variant][data-composer-radius-variant])', partFixtures.composer);
     register(':is(.composer-surface-chrome [class*="_footer_"], [class*="_ComposerLayoutRoot_"] [class*="_ComposerLayoutFooter_"], [data-composer-surface-variant][data-composer-radius-variant] :is([data-composer-footer-responsive], [class*="_ComposerLayoutFooter_"], [class*="_footer_"]))', partFixtures.composerToolbar);
@@ -859,6 +884,82 @@ export async function runRendererRuntimeTest(assetRoot) {
     "Codex 26.818 user bubbles must expose the public message part at their adaptive boundary.");
   assert.equal(modernMessages.partFixtures.assistantMessage.getAttribute("data-ds-part"), "message",
     "Codex 26.727 assistant message containers must expose the public message part.");
+  for (const key of ["steeringBubble", "processMessage", "toolMessage"]) {
+    assert.equal(modernMessages.partFixtures[key].getAttribute("data-ds-part"), "message",
+      `${key} must use the same public message bridge.`);
+  }
+  for (const key of ["steeringWrapper", "nestedProcess", "nestedTool"]) {
+    assert.equal(modernMessages.partFixtures[key].getAttribute("data-ds-part"), null,
+      `${key} must not create a second painted owner.`);
+  }
+  assert.equal(modernMessages.partFixtures.steeringBubble.style.values.size, 0,
+    "Legacy themes without chat bubble settings must receive no style overrides.");
+
+  const bubbleStyle = { foreground: "#C6D0F5", background: "#414559", transparency: 25, blur: 24 };
+  const bubbleFixture = makeFixture({ modernMessages: true });
+  const bubbleParts = bubbleFixture.partFixtures;
+  bubbleParts.userMessageBubble.style.setProperty("color", "red");
+  bubbleParts.userMessageBubble.style.setProperty("opacity", ".4", "important");
+  bubbleParts.userMessageBubble.style.setProperty("border-radius", "37px");
+  bubbleParts.steeringWrapper.setAttribute("data-state", "closed");
+  const bubbleCss = `@layer dreamskin-community {
+    [data-ds-part="message"] { color: #FFFF00 !important; background-color: #123456 !important; opacity: .7 !important; }
+  }`;
+  vm.runInNewContext(bubbleFixture.payloadFor({
+    resolvedChatBubbles: bubbleStyle, userTransparency: 90,
+  }, bubbleCss), bubbleFixture.context);
+  for (const key of ["legacyMessage", "userMessageBubble", "steeringBubble", "assistantMessage", "processMessage", "toolMessage"]) {
+    const node = bubbleParts[key];
+    for (const [property, expected] of Object.entries({
+      color: "#C6D0F5", "background-color": "rgba(65, 69, 89, 0.75)",
+      "background-image": "none", "backdrop-filter": "blur(24px)", opacity: "1",
+      "--color-text-primary": "#C6D0F5", "--ds-text": "#C6D0F5",
+    })) {
+      assert.equal(node.style.getPropertyValue(property), expected, `${key}: ${property}`);
+      assert.equal(node.style.getPropertyPriority(property), "important",
+        "The controlled bubble bridge must beat layered theme importance.");
+    }
+    assert.equal(node.style.getPropertyValue("--ds-text-rgb"), "",
+      "Bubble foreground must not recolor native border and shadow RGB tokens.");
+  }
+  assert.equal(bubbleParts.userMessageBubble.style.getPropertyValue("border-radius"), "37px");
+  assert.equal(bubbleParts.steeringWrapper.getAttribute("data-state"), "closed",
+    "Style changes must preserve native grouping and disclosure state.");
+  for (const key of ["steeringWrapper", "nestedProcess", "nestedTool"]) {
+    assert.equal(bubbleParts[key].style.getPropertyValue("background-color"), "transparent");
+    assert.equal(bubbleParts[key].style.getPropertyValue("backdrop-filter"), "none");
+  }
+  assert.equal(bubbleParts.sidebar.style.values.size, 0);
+  assert.equal(bubbleParts.composer.style.values.size, 0);
+  assert.equal(bubbleFixture.rootStyle.getPropertyValue("--ds-user-surface-alpha"), "0.1",
+    "Global transparency remains independent of the bubble's .75 alpha.");
+
+  // Streaming activity moves into the final reply without creating another
+  // glass layer. Moving back must recover its independent message treatment.
+  const bubbleObserver = bubbleFixture.observers.find((observer) => observer.options?.childList);
+  bubbleParts.processMessage.parentElement = bubbleParts.assistantMessage;
+  bubbleObserver.callback([{ type: "childList" }]);
+  bubbleFixture.flushTimers(80);
+  assert.equal(bubbleParts.processMessage.getAttribute("data-ds-part"), null);
+  assert.equal(bubbleParts.processMessage.style.getPropertyValue("background-color"), "transparent");
+  assert.equal(bubbleParts.processMessage.style.getPropertyValue("--color-text-primary"), "",
+    "A former owner must release its local token overrides.");
+  bubbleParts.processMessage.parentElement = bubbleParts.thread;
+  bubbleObserver.callback([{ type: "childList" }]);
+  bubbleFixture.flushTimers(80);
+  assert.equal(bubbleParts.processMessage.style.getPropertyValue("background-color"), "rgba(65, 69, 89, 0.75)");
+  assert.equal(bubbleFixture.window.__CODEX_DREAM_SKIN_STATE__.cleanup(), true);
+  assert.equal(bubbleParts.userMessageBubble.style.getPropertyValue("color"), "red");
+  assert.equal(bubbleParts.userMessageBubble.style.getPropertyValue("opacity"), ".4");
+  assert.equal(bubbleParts.userMessageBubble.style.getPropertyPriority("opacity"), "important");
+  assert.equal(bubbleParts.userMessageBubble.style.getPropertyValue("border-radius"), "37px");
+  assert.equal(bubbleParts.steeringWrapper.style.values.size, 0);
+  assert.equal(bubbleParts.processMessage.style.values.size, 0);
+
+  vm.runInNewContext(bubbleFixture.payloadFor({ resolvedChatBubbles: bubbleStyle }), bubbleFixture.context);
+  vm.runInNewContext(bubbleFixture.payloadFor(), bubbleFixture.context);
+  assert.equal(bubbleParts.steeringBubble.style.values.size, 0,
+    "Switching back to an older theme must remove the bubble bridge.");
 
   const generic = makeFixture({ nativeAppearance: "dark", generic: true });
   vm.runInNewContext(generic.payloadFor(), generic.context);

@@ -7,6 +7,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { decodeAndValidateSafeCss } from "./safe-css-validator.mjs";
+import { normalizeChatBubbleStyle } from "./chat-bubbles.mjs";
 
 const LIMITS = Object.freeze({
   manifest: 65_536,
@@ -292,7 +293,7 @@ function validateOfficialTheme(value) {
   assertExactKeys(
     theme,
     THEME_REQUIRED,
-    [...THEME_COPY_KEYS, "promoUrl", "appearance", "art", "colors"],
+    [...THEME_COPY_KEYS, "promoUrl", "appearance", "art", "colors", "chatBubbles"],
     "theme.json",
   );
   if (theme.schemaVersion !== 1) fail("theme.json must use schemaVersion 1");
@@ -334,6 +335,7 @@ function validateOfficialTheme(value) {
       });
     }
   }
+  if (theme.chatBubbles !== undefined) normalizeChatBubbleStyle(theme.chatBubbles, "theme.json.chatBubbles");
   return theme;
 }
 
@@ -506,6 +508,7 @@ async function validateSimple(root, names) {
   if (theme.schemaVersion !== 1 || typeof theme.image !== "string" || !theme.image) {
     fail("Local simplified theme must use schemaVersion 1 and name an image");
   }
+  if (theme.chatBubbles !== undefined) normalizeChatBubbleStyle(theme.chatBubbles, "theme.json.chatBubbles");
   if (
     path.basename(theme.image) !== theme.image
     || CONTROL_PATTERN.test(theme.image)

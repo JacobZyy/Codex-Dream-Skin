@@ -143,6 +143,10 @@ const sourceImageMetadata = await fs.readFile(
 );
 const outputs = [
   {
+    content: await fs.readFile(path.join(projectRoot, "runtime", "chat-bubbles.mjs"), "utf8"),
+    paths: ["macos/assets/chat-bubbles.mjs", "windows/assets/chat-bubbles.mjs"],
+  },
+  {
     content: await fs.readFile(path.join(projectRoot, "runtime", "theme-preferences.mjs"), "utf8"),
     paths: ["macos/assets/theme-preferences.mjs", "windows/assets/theme-preferences.mjs"],
   },

@@ -39,6 +39,7 @@
   const STYLE_REVISION = __DREAM_SKIN_STYLE_REVISION_JSON__;
   const PAYLOAD_REVISION = __DREAM_SKIN_PAYLOAD_REVISION_JSON__;
   const THEME = themeConfig && typeof themeConfig === "object" ? themeConfig : {};
+  const CHAT_BUBBLES = THEME.resolvedChatBubbles;
   // Only adapt declarations in the already validated community layer. Keep
   // foregrounds, borders and element opacity intact. Relative colors preserve
   // authored RGB/alpha (including percentages); local preferences replace alpha
@@ -818,14 +819,96 @@
       composerBorderRestores.set(node, saved);
     }
   };
-  const resolvedMessageNodes = () => selectorNodes("message").map((node) => {
-    if (!node?.hasAttribute?.("data-local-conversation-user-anchor")) return node;
-    // Current Codex user anchors span the conversation column. Prefer the
-    // adaptive native bubble, while retaining the older anchor as a fallback.
-    return node.querySelector?.(
-      '[class*="max-w-"][class*="rounded-2xl"][class*="text-start"]',
-    ) ?? node;
-  });
+  const messageSurfaceNodes = () => selectorNodes("thread-surface").flatMap((thread) =>
+    [...thread.querySelectorAll(
+      '[data-user-message-bubble], ' +
+      '[data-response-annotation-conversation][data-response-annotation-target], ' +
+      '[data-local-conversation-item-target-ids]',
+    )]);
+  const resolvedMessageNodes = (surfaces) => {
+    const messages = [...selectorNodes("message"), ...surfaces].map((node) => {
+      const userBubble = node.querySelector?.('[data-user-message-bubble]');
+      if (userBubble) return userBubble;
+      if (!node?.hasAttribute?.("data-local-conversation-user-anchor")) return node;
+      // Current Codex user anchors span the conversation column. Prefer the
+      // adaptive native bubble, while retaining the older anchor as a fallback.
+      return node.querySelector?.(
+        '[class*="max-w-"][class*="rounded-2xl"][class*="text-start"]',
+      ) ?? node;
+    });
+    // Final replies can contain former activity nodes. Paint one outer owner.
+    const candidates = [...new Set(messages)];
+    return candidates.filter((node) =>
+      !candidates.some((other) => other !== node && other.contains(node)));
+  };
+  const messageStyleRestores = new Map();
+  const restoreMessageStyle = (node) => {
+    const saved = messageStyleRestores.get(node);
+    if (!saved) return;
+    for (const [property, { value, priority }] of saved) {
+      if (value) node.style.setProperty(property, value, priority);
+      else node.style.removeProperty(property);
+      metrics.styleWrites += 1;
+    }
+    messageStyleRestores.delete(node);
+  };
+  const refreshMessageStyles = (messages, surfaces) => {
+    const desired = new Map();
+    if (CHAT_BUBBLES) {
+      const rgb = parseRgb(CHAT_BUBBLES.background);
+      const background = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${(100 - CHAT_BUBBLES.transparency) / 100})`;
+      const foreground = CHAT_BUBBLES.foreground;
+      const tokens = Object.fromEntries([
+        "--ds-text", "--color-text", "--color-text-primary", "--color-text-emphasis",
+        "--color-text-user-message", "--color-token-foreground", "--color-token-text-primary",
+      ].map((name) => [name, foreground]));
+      for (const node of messages) desired.set(node, {
+        ...tokens,
+        color: foreground,
+        "background-color": background,
+        "background-image": "none",
+        "backdrop-filter": `blur(${CHAT_BUBBLES.blur}px)`,
+        opacity: "1",
+      });
+      // Activity shells may wrap a user bubble or remain nested in a final
+      // reply. Clear only their paint/filter to avoid stacked glass surfaces.
+      for (const node of surfaces) {
+        if (desired.has(node)) continue;
+        if (!messages.some((owner) => owner.contains(node) || node.contains(owner))) continue;
+        desired.set(node, {
+          color: "inherit", "background-color": "transparent",
+          "background-image": "none", "backdrop-filter": "none", opacity: "1",
+        });
+      }
+    }
+    for (const node of messageStyleRestores.keys()) {
+      if (!desired.has(node)) restoreMessageStyle(node);
+    }
+    for (const [node, properties] of desired) {
+      if (!node?.style) continue;
+      const saved = messageStyleRestores.get(node) ?? new Map();
+      for (const [property, { value, priority }] of saved) {
+        if (Object.hasOwn(properties, property)) continue;
+        if (value) node.style.setProperty(property, value, priority);
+        else node.style.removeProperty(property);
+        saved.delete(property);
+        metrics.styleWrites += 1;
+      }
+      messageStyleRestores.set(node, saved);
+      for (const [property, value] of Object.entries(properties)) {
+        if (!saved.has(property)) saved.set(property, {
+          value: node.style.getPropertyValue(property),
+          priority: node.style.getPropertyPriority(property),
+        });
+        if (node.style.getPropertyValue(property) === value
+          && node.style.getPropertyPriority(property) === "important") continue;
+        // Inline importance beats theme Safe CSS regardless of cascade layers.
+        // The local background alpha never passes through global transparency.
+        node.style.setProperty(property, value, "important");
+        metrics.styleWrites += 1;
+      }
+    }
+  };
   const refreshParts = () => {
     metrics.partPasses += 1;
     const desired = new Map();
@@ -838,7 +921,9 @@
     addPart(desired, "main", [...selectorNodes("shell-main"), ...fallbackMainNodes()]);
     addPart(desired, "project-list", selectorNodes("project-selector"));
     addPart(desired, "thread", selectorNodes("thread-surface"));
-    addPart(desired, "message", resolvedMessageNodes());
+    const messageSurfaces = messageSurfaceNodes();
+    const messages = resolvedMessageNodes(messageSurfaces);
+    addPart(desired, "message", messages);
     const composerNodes = [...selectorNodes("composer-chrome"), ...fallbackComposerNodes()];
     addPart(desired, "composer", composerNodes);
     addPart(desired, "composer-toolbar", [
@@ -864,6 +949,7 @@
       partNodes.add(node);
     }
     refreshComposerBorders(composerNodes);
+    refreshMessageStyles(messages, messageSurfaces);
   };
 
   const predicateNodes = CSS_PREDICATES.map(() => new Set());
@@ -994,6 +1080,7 @@
       }
     }
     removeParts();
+    for (const node of messageStyleRestores.keys()) restoreMessageStyle(node);
     removePredicates();
     state?.rootObserver?.disconnect();
     state?.partObserver?.disconnect();
