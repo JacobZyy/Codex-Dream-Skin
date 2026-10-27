@@ -1444,11 +1444,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
     operationInFlight = true
     rebuildMenu()
-    ScriptRunner.run(script: script) { [weak self] result in
+    ScriptRunner.run(script: script, arguments: ["--prompt-restart"]) { [weak self] result in
       guard let self else { return }
       self.operationInFlight = false
       self.refreshStatus()
       self.rebuildMenu()
+      guard result.exitCode != 20 else { return }
       if !result.succeeded {
         self.showError(
           title: self.copy.text(.openFailedTitle),

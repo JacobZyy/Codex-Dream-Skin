@@ -199,6 +199,31 @@ test("explicit CLI restart consent still respects official quit cancellation", a
   assert.ok(result.events.includes("operation cancelled"));
 });
 
+test("prompted native start cancels before requesting app exit", async (t) => {
+  const result = await runFixture(t, "restart-cancel", "start-dream-skin-macos.sh", ["--prompt-restart"]);
+  assert.equal(result.status, 20, result.stderr);
+  assertNoRestartEffects(result);
+  assert.ok(result.events.includes("restart-confirm"));
+  assert.ok(result.events.includes("operation cancelled"));
+  assert.ok(!result.events.includes("official-quit"));
+  assert.ok(!result.events.includes("operation failed"));
+  assert.ok(!result.events.includes("alert"));
+});
+
+test("prompted native start waits for consent and exit before launch and verification", async (t) => {
+  const result = await runFixture(t, "quit-success", "start-dream-skin-macos.sh", ["--prompt-restart"]);
+  assert.equal(result.status, 0, result.stderr);
+  const ordered = ["restart-confirm", "official-quit", "release-launchd", "stop-injector", "config", "launch", "launch-injector", "write-state", "active", "operation success"];
+  let previous = -1;
+  for (const event of ordered) {
+    const index = result.events.indexOf(event);
+    assert.ok(index > previous, `Expected ordered ${event}: ${result.events.join(", ")}`);
+    previous = index;
+  }
+  assert.ok(result.events.some((event) => event.startsWith("injector ") && event.includes(" --verify ")));
+  assert.ok(!result.events.some((event) => /^kill -(TERM|KILL)/.test(event)));
+});
+
 test("CLI start without restart consent leaves a running app untouched", async (t) => {
   const result = await runFixture(t, "quit-success", "start-dream-skin-macos.sh");
   assert.equal(result.status, 1, result.stderr);
