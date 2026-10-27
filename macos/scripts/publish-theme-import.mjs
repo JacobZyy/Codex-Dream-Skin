@@ -3,6 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { decodeAndValidateSafeCss } from "../assets/safe-css-validator.mjs";
+import { readThemeScript, THEME_SCRIPT_NAME } from "../assets/theme-script.mjs";
 import { runtimeThemeContentFingerprint } from "./theme-content-fingerprint.mjs";
 
 const cliArgs = process.argv.slice(2);
@@ -99,6 +100,13 @@ function decodeTheme(bytes, label) {
   return theme;
 }
 
+async function readDeclaredThemeScript(directory, theme) {
+  if (Object.hasOwn(theme, "script") && theme.script !== THEME_SCRIPT_NAME) throw new Error("Theme script must name theme.js");
+  const script = await readThemeScript(directory);
+  if (Boolean(script) !== Object.hasOwn(theme, "script")) throw new Error("Theme script declaration must match theme.js presence");
+  return script;
+}
+
 async function readRegular(filePath, label, maxBytes) {
   let handle;
   try {
@@ -122,7 +130,7 @@ async function readRegular(filePath, label, maxBytes) {
   }
 }
 
-function normalizedFingerprint(theme, imageBytes, cssBytes = null, licenseBytes = null) {
+function normalizedFingerprint(theme, imageBytes, cssBytes = null, licenseBytes = null, scriptBytes = null) {
   const semanticTheme = { ...theme };
   delete semanticTheme.id;
   const hash = createHash("sha256")
@@ -131,6 +139,7 @@ function normalizedFingerprint(theme, imageBytes, cssBytes = null, licenseBytes 
     .update(imageBytes);
   if (cssBytes) hash.update("\0theme.css\0").update(cssBytes);
   if (licenseBytes) hash.update("\0LICENSE.txt\0").update(licenseBytes);
+  if (scriptBytes) hash.update("\0theme.js\0").update(scriptBytes);
   return hash.digest("hex");
 }
 
@@ -183,17 +192,19 @@ function canonicalJsonFingerprint(value) {
   return hash.digest("hex");
 }
 
-function sourceIdFallbackFingerprint(theme, imageBytes, cssBytes = null, licenseBytes = null) {
+function sourceIdFallbackFingerprint(theme, imageBytes, cssBytes = null, licenseBytes = null, scriptBytes = null) {
   const semanticTheme = { ...theme };
   delete semanticTheme.id;
   const hashBytes = (bytes) => createHash("sha256").update(bytes).digest("hex");
-  const identity = [
+  const parts = [
     "dreamskin-source-theme-fallback/1",
     "theme.json", canonicalJsonFingerprint(semanticTheme),
     "image", hashBytes(imageBytes),
     "theme.css", cssBytes ? hashBytes(cssBytes) : "absent",
     "LICENSE.txt", licenseBytes ? hashBytes(licenseBytes) : "absent",
-  ].join("\0");
+  ];
+  if (scriptBytes) parts.push("theme.js", hashBytes(scriptBytes));
+  const identity = parts.join("\0");
   return createHash("sha256").update(identity, "utf8").digest("hex");
 }
 
@@ -227,19 +238,20 @@ async function readStoredTheme(directory) {
     const configBytes = await readRegular(path.join(directory, "theme.json"), "Saved theme config", MAX_CONFIG_BYTES);
     const theme = decodeTheme(configBytes, "Saved theme config");
     const imageBytes = await readRegular(path.join(directory, theme.image), "Saved theme image", MAX_IMAGE_BYTES);
-    const [cssBytes, licenseBytes] = await Promise.all([
+    const [cssBytes, licenseBytes, script] = await Promise.all([
       readOptionalRegular(path.join(directory, "theme.css"), "Saved theme CSS", MAX_CSS_BYTES),
       readOptionalRegular(path.join(directory, "LICENSE.txt"), "Saved theme license", MAX_LICENSE_BYTES),
+      readDeclaredThemeScript(directory, theme),
     ]);
     if (cssBytes) decodeAndValidateSafeCss(cssBytes);
-    const allowedFiles = new Set(["theme.json", theme.image, "theme.css", "LICENSE.txt"]);
+    const allowedFiles = new Set(["theme.json", theme.image, "theme.css", "LICENSE.txt", THEME_SCRIPT_NAME]);
     const entries = await fs.readdir(directory, { withFileTypes: true });
     const hasOnlyRuntimeFiles = entries.every((entry) =>
       entry.isFile() && !entry.isSymbolicLink() && allowedFiles.has(entry.name));
     return {
       theme,
-      fingerprint: normalizedFingerprint(theme, imageBytes, cssBytes, licenseBytes),
-      contentFingerprint: runtimeThemeContentFingerprint(theme, imageBytes, cssBytes),
+      fingerprint: normalizedFingerprint(theme, imageBytes, cssBytes, licenseBytes, script?.bytes ?? null),
+      contentFingerprint: runtimeThemeContentFingerprint(theme, imageBytes, cssBytes, script?.bytes ?? null),
       hasOnlyRuntimeFiles,
     };
   } catch {
@@ -726,22 +738,25 @@ async function main() {
   const imagePath = path.join(stageRoot, sourceTheme.image);
   assertContained(stageRoot, imagePath, "Imported theme image");
   const imageBytes = await readRegular(imagePath, "Imported theme image", MAX_IMAGE_BYTES);
-  const [manifestBytes, cssBytes, licenseBytes, signatureBytes] = await Promise.all([
+  const [manifestBytes, cssBytes, licenseBytes, signatureBytes, script] = await Promise.all([
     readOptionalRegular(path.join(stageRoot, "manifest.json"), "Imported manifest", MAX_MANIFEST_BYTES),
     readOptionalRegular(path.join(stageRoot, "theme.css"), "Imported theme CSS", MAX_CSS_BYTES),
     readOptionalRegular(path.join(stageRoot, "LICENSE.txt"), "Imported theme license", MAX_LICENSE_BYTES),
     readOptionalRegular(path.join(stageRoot, "manifest.sig"), "Imported reserved signature", MAX_SIGNATURE_BYTES),
+    readDeclaredThemeScript(stageRoot, sourceTheme),
   ]);
   const packageFormat = manifestBytes ? "official" : "simple";
+  if (script && !manifestBytes) throw new Error("Theme script imports require manifest.json");
   if (!cssBytes) throw new Error("New theme imports require non-empty theme.css");
   decodeAndValidateSafeCss(cssBytes);
   const safeCssStatus = "validated";
-  const fingerprint = normalizedFingerprint(sourceTheme, imageBytes, cssBytes, licenseBytes);
+  const fingerprint = normalizedFingerprint(sourceTheme, imageBytes, cssBytes, licenseBytes, script?.bytes ?? null);
   const fallbackFingerprint = sourceIdFallbackFingerprint(
     sourceTheme,
     imageBytes,
     cssBytes,
     licenseBytes,
+    script?.bytes ?? null,
   );
   const releaseLock = await acquireLock(themesRoot);
   let temporary = "";
@@ -839,7 +854,7 @@ async function main() {
     const renamed = id !== (typeof sourceTheme.id === "string" ? sourceTheme.id.trim() : "");
     const theme = { ...sourceTheme, id };
     const name = displayName(theme);
-    const contentFingerprint = runtimeThemeContentFingerprint(theme, imageBytes, cssBytes);
+    const contentFingerprint = runtimeThemeContentFingerprint(theme, imageBytes, cssBytes, script?.bytes ?? null);
     const destination = path.join(themesRoot, id);
     assertContained(themesRoot, destination, "Imported theme destination");
 
@@ -851,6 +866,7 @@ async function main() {
       Buffer.from(`${JSON.stringify(theme, null, 2)}\n`, "utf8"),
     );
     if (cssBytes) await writeDurableExclusive(path.join(temporary, "theme.css"), cssBytes);
+    if (script) await writeDurableExclusive(path.join(temporary, THEME_SCRIPT_NAME), script.bytes);
     if (licenseBytes) {
       await writeDurableExclusive(path.join(temporary, "LICENSE.txt"), licenseBytes);
     }

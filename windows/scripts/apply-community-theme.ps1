@@ -224,6 +224,9 @@ function Copy-DreamSkinActiveThemeSnapshot {
   $imageName = [System.IO.Path]::GetFileName($active.ImagePath)
   Copy-Item -LiteralPath $active.ThemePath -Destination (Join-Path $Destination 'theme.json') -Force
   Copy-Item -LiteralPath $active.ImagePath -Destination (Join-Path $Destination $imageName) -Force
+  if ($active.ScriptPath) {
+    Copy-Item -LiteralPath $active.ScriptPath -Destination (Join-Path $Destination 'theme.js') -Force
+  }
   $activeCss = Join-Path $Paths.Active 'theme.css'
   if (Test-Path -LiteralPath $activeCss -PathType Leaf) {
     Assert-DreamSkinSafeCssFile -Path $activeCss
@@ -257,6 +260,9 @@ function Copy-DreamSkinImportedThemeSnapshot {
   Copy-Item -LiteralPath $source.ThemePath -Destination (Join-Path $Destination 'theme.json') -Force
   Copy-Item -LiteralPath $source.ImagePath -Destination (Join-Path $Destination $imageName) -Force
   Copy-Item -LiteralPath $sourceCss -Destination (Join-Path $Destination 'theme.css') -Force
+  if ($source.ScriptPath) {
+    Copy-Item -LiteralPath $source.ScriptPath -Destination (Join-Path $Destination 'theme.js') -Force
+  }
   $sourceLicense = Join-Path $sourceRoot 'LICENSE.txt'
   if (Test-Path -LiteralPath $sourceLicense -PathType Leaf) {
     Assert-DreamSkinNoReparseComponents -Path $sourceLicense
@@ -285,7 +291,7 @@ function Restore-DreamSkinActiveThemeSnapshot {
   $cssPath = Join-Path $SnapshotDirectory 'theme.css'
   if (-not (Test-Path -LiteralPath $cssPath -PathType Leaf)) { $cssPath = $null }
   $null = Set-DreamSkinActiveTheme -ImagePath $snapshot.ImagePath -Theme $theme `
-    -SafeCssPath $cssPath -StateRoot $StateRoot
+    -SafeCssPath $cssPath -ScriptPath $snapshot.ScriptPath -StateRoot $StateRoot
   $paths = Get-DreamSkinThemePaths -StateRoot $StateRoot
   $restoredFingerprint = Get-DreamSkinThemeRuntimeContentFingerprint -ThemeDirectory $paths.Active
   if ($restoredFingerprint -cne $ExpectedContentFingerprint) {
@@ -310,7 +316,7 @@ function Set-DreamSkinActiveThemeFromSnapshot {
   Assert-DreamSkinSafeCssFile -Path $cssPath
   $theme = $candidate.Theme | ConvertTo-Json -Depth 8 | ConvertFrom-Json
   $null = Set-DreamSkinActiveTheme -ImagePath $candidate.ImagePath -Theme $theme `
-    -SafeCssPath $cssPath -StateRoot $StateRoot
+    -SafeCssPath $cssPath -ScriptPath $candidate.ScriptPath -StateRoot $StateRoot
   $paths = Get-DreamSkinThemePaths -StateRoot $StateRoot
   $activeFingerprint = Get-DreamSkinThemeRuntimeContentFingerprint -ThemeDirectory $paths.Active
   if ($activeFingerprint -cne $ExpectedContentFingerprint) {

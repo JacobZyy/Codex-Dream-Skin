@@ -164,12 +164,16 @@ This portrait material remains in the source repository for reference and rights
 
 For themes from DreamSkin.cc, prefer [one-click apply](#theme-library--community). The manual path below is the fallback, and covers packs from any other source.
 
+This fork's 1.5.22 line also supports optional, explicitly trusted local `theme.js` scripts. Import only saves the theme; it does not execute or trust a script. After reviewing its code, grant trust to its exact SHA-256, then select the saved theme. A → B → A and page reload mount a new script generation; Restore aborts it and runs its registered cleanup. Scripts can access Codex's page and chat content. The current upstream client and online gallery do not support this extension; see the [local script contract and trust commands](./docs/theme-scripts.md), and check [fork Releases](https://github.com/JacobZyy/Codex-Dream-Skin/releases) for compatible builds.
+
 <details>
 <summary><strong>Read the full import contract</strong> — accepted formats, validation and limits</summary>
 
 Choose **Import Theme ZIP…** from the macOS menu bar app or the Windows tray. Only ordinary `.zip` files are accepted; the legacy `.dreamskin` extension is not supported, and renaming the suffix is not a supported migration path.
 
 An official Studio pack contains `manifest.json`, `theme.json`, `theme.css` and exactly one `background.webp|jpg|png`, plus optional `LICENSE.txt` and the reserved `manifest.sig`. Put these files at the ZIP root or inside exactly one top-level theme folder. The importer verifies platform and minimum-client compatibility plus every declared payload file's byte length and SHA-256. `theme.css` must pass the local Safe CSS validator and can affect only the 12 registered parts; it is revalidated on every import and apply. `manifest.sig` is not used for signature verification.
+
+A local scripted pack additionally registers `theme.js` in its manifest, uses `skinApiVersion: 2`, declares the `theme-script` capability and requires client 1.5.22 or newer. Its `theme.json` stays at `schemaVersion: 1` and opts in with `"script": "theme.js"`. The script must be nonempty UTF-8, at most 6 MiB; its registered byte count and SHA-256 are checked. The simplified format below cannot carry scripts.
 
 The local simplified ZIP must contain exactly non-empty `theme.json`, non-empty `theme.css`, and its referenced image. That format has no official manifest integrity or compatibility declaration and should come from a trusted source. Limits are 32 MiB per archive, 32 entries, and 64 MiB expanded.
 
@@ -195,6 +199,7 @@ Platform scripts are ready — different plumbing, same goal: theme Codex.
 
 - Mac: [`macos/README.md`](./macos/README.md) · Windows: [`windows/README.md`](./windows/README.md) · [Windows EN](./windows/README.en.md)
 - Paths and capability matrix: [`docs/platforms.md`](./docs/platforms.md)
+- Optional local theme scripts, exact-hash trust and lifecycle API: [`docs/theme-scripts.md`](./docs/theme-scripts.md)
 - Copy-ready background prompt guide: [`docs/reference-background-prompt-guide.en.md`](./docs/reference-background-prompt-guide.en.md) · eight concept breakdowns: [`docs/background-generation-prompts.md`](./docs/background-generation-prompts.md)
 - Project notes: [`docs/PROJECT.md`](./docs/PROJECT.md)
 
@@ -205,6 +210,7 @@ Platform scripts are ready — different plumbing, same goal: theme Codex.
 
 ## Safety
 
+- A trusted `theme.js` is executable page code, beyond the Safe CSS boundary. Review third-party code before granting its exact hash; changed bytes require a new grant. Switching away or restoring aborts the script and runs its registered cleanup callbacks. Authors must register every owned resource; the script API is not a sandbox.
 - CDP binds `127.0.0.1` only, but it has **no authentication**; another process on the same computer may still connect and inspect or control the renderer.
 - Pausing the theme or stopping only the injector does not close the debug port of an already running Codex process. Use a full Restore/restart, or quit every Codex process and reopen the official app normally, to end the exposure window.
 - Does not touch the official install directory or code signature.

@@ -7,6 +7,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { decodeAndValidateSafeCss } from "./safe-css-validator.mjs";
+import { readThemeScript, MAX_THEME_SCRIPT_BYTES, THEME_SCRIPT_MIN_CLIENT_VERSION, THEME_SCRIPT_NAME } from "./theme-script.mjs";
 
 const LIMITS = Object.freeze({
   manifest: 65_536,
@@ -27,6 +28,7 @@ const PAYLOAD_MEDIA = new Map([
   ["theme.json", "application/json"],
   ...BACKGROUND_MEDIA,
   ["theme.css", "text/css"],
+  [THEME_SCRIPT_NAME, "application/javascript"],
   ["LICENSE.txt", "text/plain"],
 ]);
 const PACKAGE_FILES = new Set([
@@ -204,6 +206,7 @@ function expectedLimit(name, simple = false) {
   if (name === "manifest.json") return LIMITS.manifest;
   if (name === "theme.json") return simple ? LIMITS.simpleTheme : LIMITS.theme;
   if (name === "theme.css") return LIMITS.css;
+  if (name === THEME_SCRIPT_NAME) return MAX_THEME_SCRIPT_BYTES;
   if (name === "LICENSE.txt") return LIMITS.license;
   if (name === "manifest.sig") return LIMITS.signature;
   if (BACKGROUND_MEDIA.has(name) || /\.(?:png|jpe?g|webp)$/i.test(name)) return LIMITS.image;
@@ -292,10 +295,11 @@ function validateOfficialTheme(value) {
   assertExactKeys(
     theme,
     THEME_REQUIRED,
-    [...THEME_COPY_KEYS, "promoUrl", "appearance", "art", "colors"],
+    [...THEME_COPY_KEYS, "promoUrl", "appearance", "art", "colors", "script"],
     "theme.json",
   );
   if (theme.schemaVersion !== 1) fail("theme.json must use schemaVersion 1");
+  if (Object.hasOwn(theme, "script") && theme.script !== THEME_SCRIPT_NAME) fail("theme.json.script must name theme.js");
   assertString(theme.id, "theme.json.id", { min: 3, max: 64, pattern: THEME_ID_PATTERN, controls: null });
   assertString(theme.name, "theme.json.name", { min: 1, max: 80 });
   assertString(theme.image, "theme.json.image", { min: 1, max: 32, controls: null });
@@ -341,7 +345,7 @@ function validateManifest(value, platform, clientVersion) {
   const manifest = assertObject(value, "manifest.json");
   assertExactKeys(manifest, MANIFEST_REQUIRED, ["keyId"], "manifest.json");
   if (manifest.packageVersion !== 1) fail("manifest.json must use packageVersion 1");
-  if (manifest.skinApiVersion !== 1) fail("manifest.json requires an unsupported Skin API version");
+  if (manifest.skinApiVersion !== 1 && manifest.skinApiVersion !== 2) fail("manifest.json requires an unsupported Skin API version");
   assertString(manifest.themeId, "manifest.themeId", {
     min: 3,
     max: 64,
@@ -350,6 +354,9 @@ function validateManifest(value, platform, clientVersion) {
   });
   parseSemver(manifest.version, "manifest.version");
   const requiredClient = parseSemver(manifest.minClientVersion, "manifest.minClientVersion");
+  if (manifest.skinApiVersion === 2 && compareSemver(requiredClient, parseSemver(THEME_SCRIPT_MIN_CLIENT_VERSION, "script minimum client version")) < 0) {
+    fail(`Theme scripts require minClientVersion ${THEME_SCRIPT_MIN_CLIENT_VERSION} or newer`);
+  }
   const installedClient = parseSemver(clientVersion, "client version");
   if (compareSemver(requiredClient, installedClient) > 0) {
     fail(`Theme requires Dream Skin ${manifest.minClientVersion} or newer; installed version is ${clientVersion}`);
@@ -362,9 +369,10 @@ function validateManifest(value, platform, clientVersion) {
   if (!platforms.has(platform)) fail(`Theme package does not support ${platform}`);
   const capabilities = assertStringSet(manifest.capabilities, "manifest.capabilities", {
     min: 1,
-    max: 3,
-    allowed: new Set(["background", "tokens", "safe-css"]),
+    max: 4,
+    allowed: new Set(["background", "tokens", "safe-css", "theme-script"]),
   });
+  if (capabilities.has("theme-script") !== (manifest.skinApiVersion === 2)) fail("The theme-script capability must match Skin API version 2");
 
   const publisher = assertObject(manifest.publisher, "manifest.publisher");
   assertExactKeys(publisher, ["id", "displayName"], [], "manifest.publisher");
@@ -423,6 +431,7 @@ function validateManifest(value, platform, clientVersion) {
     files.set(entry.path, entry);
   }
   const backgrounds = [...files.keys()].filter((name) => BACKGROUND_MEDIA.has(name));
+  if (files.has(THEME_SCRIPT_NAME) !== capabilities.has("theme-script")) fail("theme.js presence must match the theme-script capability");
   if (!files.has("theme.json") || backgrounds.length !== 1) {
     fail("manifest.files must contain theme.json and exactly one background file");
   }
@@ -465,7 +474,13 @@ async function validateOfficial(root, names, platform, clientVersion) {
   }
   if (!names.includes("manifest.json")) fail("Official theme package is missing manifest.json");
   const bytes = new Map();
-  for (const name of names) bytes.set(name, await readStableFile(root, name, expectedLimit(name)));
+  for (const name of names) {
+    if (name === THEME_SCRIPT_NAME) {
+      const script = await readThemeScript(root);
+      if (!script) fail("theme.js changed while the package was being validated");
+      bytes.set(name, script.bytes);
+    } else bytes.set(name, await readStableFile(root, name, expectedLimit(name)));
+  }
   const { manifest, files, background } = validateManifest(
     decodeJson(bytes.get("manifest.json"), "manifest.json"),
     platform,
@@ -482,6 +497,7 @@ async function validateOfficial(root, names, platform, clientVersion) {
     if (sha256(data) !== entry.sha256) fail(`${name} SHA-256 does not match manifest.json`);
   }
   const theme = validateOfficialTheme(decodeJson(bytes.get("theme.json"), "theme.json"));
+  if (Object.hasOwn(theme, "script") !== bytes.has(THEME_SCRIPT_NAME)) fail("theme.json script declaration must match theme.js presence");
   if (manifest.themeId !== theme.id) fail("manifest.themeId does not match theme.json id");
   if (theme.image !== background) fail("theme.json image does not match the manifest background file");
   if (detectedImageMedia(bytes.get(background)) !== BACKGROUND_MEDIA.get(background)) {
@@ -503,6 +519,7 @@ async function validateSimple(root, names) {
   }
   const themeBytes = await readStableFile(root, "theme.json", LIMITS.simpleTheme);
   const theme = assertObject(decodeJson(themeBytes, "theme.json"), "theme.json");
+  if (Object.hasOwn(theme, "script") || names.includes(THEME_SCRIPT_NAME)) fail("Local simplified ZIPs do not support theme scripts");
   if (theme.schemaVersion !== 1 || typeof theme.image !== "string" || !theme.image) {
     fail("Local simplified theme must use schemaVersion 1 and name an image");
   }

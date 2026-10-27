@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { decodeAndValidateSafeCss } from "../assets/safe-css-validator.mjs";
+import { readThemeScript, THEME_SCRIPT_NAME } from "../assets/theme-script.mjs";
 import { runtimeThemeContentFingerprint } from "./theme-content-fingerprint.mjs";
 
 const [sourceDirArg, stageDirArg] = process.argv.slice(2);
@@ -108,10 +109,13 @@ async function main() {
 
   const imagePath = path.resolve(sourceRoot, theme.image);
   assertContained(sourceRoot, imagePath, "Theme image");
-  const [image, safeCss] = await Promise.all([
+  const [image, safeCss, script] = await Promise.all([
     readStableFile(imagePath, "Theme image", MAX_IMAGE_BYTES),
     readOptionalStableFile(path.join(sourceRoot, "theme.css"), "Theme Safe CSS", MAX_CSS_BYTES),
+    readThemeScript(sourceRoot),
   ]);
+  if (Object.hasOwn(theme, "script") && theme.script !== THEME_SCRIPT_NAME) throw new Error("Theme script must name theme.js");
+  if (Boolean(script) !== Object.hasOwn(theme, "script")) throw new Error("Theme script declaration must match theme.js presence");
   if (image.bytes.length < 1) throw new Error("Theme image is empty");
   if (safeCss) decodeAndValidateSafeCss(safeCss.bytes);
 
@@ -126,10 +130,11 @@ async function main() {
   // observes a complete pair; subsequent source edits cannot race the copy.
   await writeExclusive(path.join(stageRoot, theme.image), image.bytes);
   if (safeCss) await writeExclusive(path.join(stageRoot, "theme.css"), safeCss.bytes);
+  if (script) await writeExclusive(path.join(stageRoot, THEME_SCRIPT_NAME), script.bytes);
   await writeExclusive(path.join(stageRoot, "theme.json"), config.bytes);
   process.stdout.write(JSON.stringify({
     image: theme.image,
-    contentFingerprint: runtimeThemeContentFingerprint(theme, image.bytes, safeCss?.bytes ?? null),
+    contentFingerprint: runtimeThemeContentFingerprint(theme, image.bytes, safeCss?.bytes ?? null, script?.bytes ?? null),
   }));
 }
 

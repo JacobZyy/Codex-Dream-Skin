@@ -131,13 +131,19 @@ process.stdout.write(value.contentFingerprint);
   || fail "Saved theme content no longer matches the package that was imported."
 # Validate the exact staged pair, not the mutable library directory. The
 # injector performs the full schema, path, dimensions, and image checks.
-"$NODE" "$INJECTOR" --check-payload --theme-dir "$stage" >/dev/null \
+"$NODE" "$INJECTOR" --check-payload --require-script-trust --theme-dir "$stage" >/dev/null \
   || fail "Theme pack failed validation: $THEME_ID"
 THEME_BYTES="$(/usr/bin/stat -f '%z' "$stage/$THEME_IMAGE")"
 [ "$THEME_BYTES" -gt 0 ] && [ "$THEME_BYTES" -le 10485760 ] \
   || fail "Theme image must be non-empty and no larger than 10 MiB."
 SAFE_CSS_NAME=""
 [ ! -f "$stage/theme.css" ] || SAFE_CSS_NAME="theme.css"
+THEME_SCRIPT_NAME=""
+[ ! -f "$stage/theme.js" ] || THEME_SCRIPT_NAME="theme.js"
+if [ -e "$THEME_DIR/theme.js" ] || [ -L "$THEME_DIR/theme.js" ]; then
+  [ -f "$THEME_DIR/theme.js" ] && [ ! -L "$THEME_DIR/theme.js" ] \
+    || fail "The active theme.js target must be a regular file."
+fi
 /bin/chmod 600 "$stage/"*
 progress "$(dreamskin_text publishing_validated_theme)"
 for entry in "$stage/"*; do
@@ -148,15 +154,16 @@ done
 # A legacy theme has no Safe CSS. Remove the previous theme's CSS before the
 # config commit marker so a failed cleanup cannot pair new metadata with old CSS.
 [ -n "$SAFE_CSS_NAME" ] || /bin/rm -f "$THEME_DIR/theme.css"
+[ -n "$THEME_SCRIPT_NAME" ] || /bin/rm -f "$THEME_DIR/theme.js"
 # theme.json is the commit marker: the watcher never observes a config that
 # references a partially copied image.
 /bin/mv -f "$stage/theme.json" "$THEME_DIR/theme.json"
 if [ -n "$SAFE_CSS_NAME" ]; then
   /usr/bin/find "$THEME_DIR" -maxdepth 1 -type f \
-    ! -name 'theme.json' ! -name "$THEME_IMAGE" ! -name 'theme.css' -delete
+    ! -name 'theme.json' ! -name "$THEME_IMAGE" ! -name 'theme.css' ! -name "$THEME_SCRIPT_NAME" -delete
 else
   /usr/bin/find "$THEME_DIR" -maxdepth 1 -type f \
-    ! -name 'theme.json' ! -name "$THEME_IMAGE" -delete
+    ! -name 'theme.json' ! -name "$THEME_IMAGE" ! -name "$THEME_SCRIPT_NAME" -delete
 fi
 /bin/rm -rf "$stage"
 stage=""

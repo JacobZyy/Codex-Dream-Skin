@@ -188,7 +188,7 @@ if [ -f "$SOURCE_ROOT/manifest.json" ]; then
   while IFS= read -r -d '' source_file; do
     source_name="$(/usr/bin/basename "$source_file")"
     case "$source_name" in
-      manifest.json|manifest.sig|theme.json|theme.css|LICENSE.txt) ;;
+      manifest.json|manifest.sig|theme.json|theme.css|theme.js|LICENSE.txt) ;;
       background.webp|background.jpg|background.png)
         official_backgrounds=$((official_backgrounds + 1))
         ;;

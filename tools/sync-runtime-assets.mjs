@@ -143,6 +143,10 @@ const sourceImageMetadata = await fs.readFile(
 );
 const outputs = [
   {
+    content: await fs.readFile(path.join(projectRoot, "runtime", "theme-script.mjs"), "utf8"),
+    paths: ["macos/assets/theme-script.mjs", "windows/assets/theme-script.mjs"],
+  },
+  {
     content: await fs.readFile(path.join(projectRoot, "runtime", "theme-preferences.mjs"), "utf8"),
     paths: ["macos/assets/theme-preferences.mjs", "windows/assets/theme-preferences.mjs"],
   },

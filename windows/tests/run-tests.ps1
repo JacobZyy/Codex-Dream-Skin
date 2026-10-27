@@ -1164,6 +1164,7 @@ try {
   Copy-Item -LiteralPath (Join-Path $Root 'VERSION') -Destination $releaseFixtureRoot -Force
   foreach ($releaseAsset in @(
     'dream-skin.css', 'renderer-inject.js', 'safe-css-policy.json', 'safe-css-validator.mjs', 'selectors.json',
+    'theme-script.mjs', 'theme-preferences.mjs',
     'theme-package-validator.mjs'
   )) {
     Copy-Item -LiteralPath (Join-Path $Root "assets\$releaseAsset") `
@@ -1564,6 +1565,7 @@ try {
     '[System.IO.Compression.ZipArchive]',
     'Only ordinary .zip theme packages are supported',
     'Theme ZIP exceeds the 64 MB expanded-size limit',
+    'Assert-DreamSkinThemeScriptFile',
     'theme-package-validator.mjs',
     '16384px / 50MP safety limit',
     'Assert-DreamSkinImageFile -Path $temporary',

@@ -75,6 +75,7 @@ async function makeOfficial(name, options = {}) {
     art: { focusX: 0.7, focusY: 0.5, safeArea: "left", taskMode: "full" },
     colors,
   };
+  if (options.script) theme.script = "theme.js";
   if (options.mutateTheme) options.mutateTheme(theme);
   const themeData = jsonBytes(theme);
   const files = [
@@ -83,6 +84,12 @@ async function makeOfficial(name, options = {}) {
   ];
   const capabilities = ["background", "tokens"];
   const extraFiles = new Map();
+  if (options.script) {
+    const script = options.scriptBytes ?? Buffer.from(options.scriptSource ?? 'globalThis.__dreamSkinPackageExecuted = true; throw new Error("must never run during import");\n', "utf8");
+    files.push(fileEntry("theme.js", "application/javascript", script));
+    capabilities.push("theme-script");
+    extraFiles.set("theme.js", script);
+  }
   if (options.css !== false) {
     const css = Buffer.from(options.cssSource ??
       '[data-ds-part="composer"] { background-color: var(--ds-theme-color-panel); }\n', "utf8");
@@ -100,8 +107,8 @@ async function makeOfficial(name, options = {}) {
     packageVersion: 1,
     themeId: options.manifestThemeId ?? theme.id,
     version: "1.2.3",
-    skinApiVersion: 1,
-    minClientVersion: options.minClientVersion ?? "1.3.0",
+    skinApiVersion: options.script ? 2 : 1,
+    minClientVersion: options.minClientVersion ?? (options.script ? "1.5.22" : "1.3.0"),
     platforms: options.platforms ?? ["macos", "windows"],
     capabilities,
     publisher: { id: "dreamskin-studio", displayName: "DreamSkin Studio" },
@@ -125,7 +132,7 @@ async function makeOfficial(name, options = {}) {
   return { source, manifest, theme };
 }
 
-async function validate(source, platform, label) {
+async function validate(source, platform, label, clientVersion = "1.3.3") {
   const stage = path.join(tempRoot, `stage-${label}`);
   await fs.mkdir(stage);
   const result = await run(process.execPath, [
@@ -133,12 +140,12 @@ async function validate(source, platform, label) {
     "--source", source,
     "--stage", stage,
     "--platform", platform,
-    "--client-version", "1.3.3",
+    "--client-version", clientVersion,
   ]);
   return { stage, output: JSON.parse(result.stdout) };
 }
 
-async function expectRejected(source, platform, pattern, label) {
+async function expectRejected(source, platform, pattern, label, clientVersion = "1.3.3") {
   const stage = path.join(tempRoot, `rejected-${label}`);
   await fs.mkdir(stage);
   await assert.rejects(
@@ -147,7 +154,7 @@ async function expectRejected(source, platform, pattern, label) {
       "--source", source,
       "--stage", stage,
       "--platform", platform,
-      "--client-version", "1.3.3",
+      "--client-version", clientVersion,
     ]),
     pattern,
   );
@@ -171,6 +178,38 @@ try {
     "theme.css",
     "theme.json",
   ]);
+
+  const scripted = await makeOfficial("official-script", { script: true });
+  for (const platform of ["macos", "windows"]) {
+    const result = await validate(scripted.source, platform, `script-${platform}`, "1.5.22");
+    assert.equal(result.output.format, "official");
+    assert.deepEqual(await fs.readFile(path.join(result.stage, "theme.js")), await fs.readFile(path.join(scripted.source, "theme.js")));
+  }
+  await expectRejected(scripted.source, "macos", /requires Dream Skin 1\.5\.22/, "script-old-client");
+  const oldScriptMinimum = await makeOfficial("script-old-minimum", { script: true, minClientVersion: "1.5.21" });
+  await expectRejected(oldScriptMinimum.source, "windows", /require minClientVersion 1\.5\.22/, "script-old-minimum", "1.5.22");
+  for (const [label, options, pattern] of [
+    ["no-declaration", { mutateTheme: (theme) => { delete theme.script; } }, /declaration/],
+    ["bad-declaration", { mutateTheme: (theme) => { theme.script = "../theme.js"; } }, /script must name/],
+    ["no-capability", { mutateManifest: (manifest) => { manifest.capabilities = manifest.capabilities.filter((value) => value !== "theme-script"); } }, /capability/],
+    ["api-one", { mutateManifest: (manifest) => { manifest.skinApiVersion = 1; } }, /capability/],
+    ["bad-media", { mutateManifest: (manifest) => { manifest.files.find((entry) => entry.path === "theme.js").mediaType = "text/javascript"; } }, /mediaType/],
+    ["empty", { scriptSource: "" }, /bytes|non-empty/],
+    ["bad-syntax", { scriptSource: "return );" }, /syntax|Unexpected|parse/i],
+    ["bad-utf8", { scriptBytes: Buffer.from([0xc0, 0xaf]) }, /UTF-8/],
+    ["oversize", { scriptSource: "/*" + "x".repeat(6 * 1024 * 1024) + "*/" }, /bounded|limit|larger|bytes/],
+  ]) {
+    const fixture = await makeOfficial(`script-${label}`, { script: true, ...options });
+    await expectRejected(fixture.source, "macos", pattern, `script-${label}`, "1.5.22");
+  }
+  const scriptMissing = await makeOfficial("script-missing", { script: true });
+  await fs.unlink(path.join(scriptMissing.source, "theme.js"));
+  await expectRejected(scriptMissing.source, "macos", /exactly match/, "script-missing", "1.5.22");
+  const scriptTampered = await makeOfficial("script-tampered", { script: true });
+  await fs.writeFile(path.join(scriptTampered.source, "theme.js"), 'globalThis.__dreamSkinPackageExecuted = true; throw new Error("Must never run during import");\n');
+  await expectRejected(scriptTampered.source, "windows", /byte length|SHA-256/, "script-tampered", "1.5.22");
+  const scriptBoundary = await makeOfficial("script-boundary", { script: true, scriptSource: "/*" + "x".repeat((6 * 1024 * 1024) - 4) + "*/" });
+  await validate(scriptBoundary.source, "windows", "script-boundary", "1.5.22");
 
   const impossibleTimestamp = await makeOfficial("official-impossible-timestamp", {
     mutateManifest: (manifest) => { manifest.createdAt = "2026-02-30T00:00:00Z"; },
@@ -311,6 +350,13 @@ try {
   const simple = await validate(simpleSource, "macos", "simple");
   assert.equal(simple.output.format, "simple");
   assert.equal(simple.output.safeCssStatus, "validated");
+  const simpleOriginal = await fs.readFile(path.join(simpleSource, "theme.json"));
+  await fs.writeFile(path.join(simpleSource, "theme.json"), JSON.stringify({ ...JSON.parse(simpleOriginal), script: "theme.js" }));
+  await expectRejected(simpleSource, "macos", /do not support theme scripts/, "simple-script-declaration");
+  await fs.writeFile(path.join(simpleSource, "theme.js"), "return;\n");
+  await expectRejected(simpleSource, "windows", /must contain exactly/, "simple-script-file");
+  await fs.unlink(path.join(simpleSource, "theme.js"));
+  await fs.writeFile(path.join(simpleSource, "theme.json"), simpleOriginal);
   const simpleWithoutCss = path.join(tempRoot, "simple-without-css");
   await fs.mkdir(simpleWithoutCss);
   await fs.copyFile(fixtureImage, path.join(simpleWithoutCss, "custom-background.png"));

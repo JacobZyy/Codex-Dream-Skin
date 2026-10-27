@@ -39,6 +39,9 @@
   const STYLE_REVISION = __DREAM_SKIN_STYLE_REVISION_JSON__;
   const PAYLOAD_REVISION = __DREAM_SKIN_PAYLOAD_REVISION_JSON__;
   const THEME = themeConfig && typeof themeConfig === "object" ? themeConfig : {};
+  const themeScript = __DREAM_SKIN_THEME_SCRIPT__;
+  const hasThemeScript = typeof themeScript === "function";
+  const scriptStatus = hasThemeScript ? { state: "loading", sha256: THEME.scriptSha256 } : null;
   // Only adapt declarations in the already validated community layer. Keep
   // foregrounds, borders and element opacity intact. Relative colors preserve
   // authored RGB/alpha (including percentages); local preferences replace alpha
@@ -978,10 +981,62 @@
     if (scopePass) refreshScope();
   };
 
+  let scriptController = null;
+  let scriptDisposed = false;
+  const scriptDisposers = [];
+  const runScriptDisposer = (dispose) => {
+    try { dispose(); } catch {
+      scriptStatus.error ||= "theme-script-cleanup-failed";
+    }
+  };
+  const cleanupScript = () => {
+    if (!hasThemeScript || scriptDisposed) return false;
+    scriptDisposed = true;
+    if (scriptStatus.state !== "error") scriptStatus.state = "disposed";
+    try { scriptController?.abort(); } catch {
+      scriptStatus.error ||= "theme-script-cleanup-failed";
+    }
+    scriptController = null;
+    for (const dispose of scriptDisposers.splice(0).reverse()) runScriptDisposer(dispose);
+    return true;
+  };
+  const scriptIsCurrent = () => !scriptDisposed && !window[DISABLED_KEY]
+    && window[STATE_KEY]?.installToken === installToken;
+  const failScript = () => {
+    if (!scriptIsCurrent()) return;
+    scriptStatus.state = "error";
+    scriptStatus.error = "theme-script-execution-failed";
+    cleanupScript();
+  };
+  const readyScript = () => {
+    if (scriptIsCurrent()) scriptStatus.state = "ready";
+  };
+  const mountScript = () => {
+    if (!hasThemeScript || !scriptIsCurrent()) return;
+    try {
+      scriptController = new AbortController();
+      const readiness = themeScript({
+        theme: THEME,
+        artUrl,
+        root: document.documentElement,
+        signal: scriptController.signal,
+        onCleanup(dispose) {
+          if (typeof dispose !== "function") throw new TypeError("Theme cleanup must be a function");
+          if (scriptDisposed) runScriptDisposer(dispose);
+          else scriptDisposers.push(dispose);
+        },
+      });
+      if (readiness && typeof readiness.then === "function") {
+        Promise.resolve(readiness).then(readyScript, failScript);
+      } else readyScript();
+    } catch { failScript(); }
+  };
+
   const cleanup = () => {
     const state = window[STATE_KEY];
     if (state?.installToken !== installToken) return false;
     window[DISABLED_KEY] = true;
+    cleanupScript();
     const root = document.documentElement;
     for (const name of ROOT_ATTRS) root?.removeAttribute(name);
     for (const attribute of [...(root?.attributes || [])]) {
@@ -1078,6 +1133,9 @@
   window[STATE_KEY] = {
     ensure,
     cleanup,
+    cleanupScript,
+    hasThemeScript,
+    script: scriptStatus,
     rootObserver,
     partObserver,
     timer: null,
@@ -1165,6 +1223,7 @@
     }
     ensure({ root: true });
   }).catch(() => {});
+  mountScript();
   return {
     installed: true,
     version: VERSION,
@@ -1174,5 +1233,7 @@
     scope: initialScope,
     styleMode,
     analysis: artAnalysis,
+    hasThemeScript,
+    script: scriptStatus,
   };
 })(__DREAM_SKIN_CSS_JSON__, __DREAM_SKIN_ART_JSON__, __DREAM_SKIN_THEME_JSON__)

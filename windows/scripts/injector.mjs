@@ -10,6 +10,7 @@ import {
   normalizeThemeText,
 } from "../assets/theme-package-validator.mjs";
 import { decodeAndValidateSafeCss } from "../assets/safe-css-validator.mjs";
+import { readThemeScript, isThemeScriptTrusted, trustThemeScript } from "../assets/theme-script.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const here = path.dirname(scriptPath);
@@ -40,7 +41,7 @@ const stableTestidLiteral = (testid) => {
   }
   return JSON.stringify(`[data-testid="${testid}"]`);
 };
-const SKIN_VERSION = "1.5.21";
+const SKIN_VERSION = "1.5.22";
 // .github/workflows/ci.yml's version-consistency check greps this file for a
 // literal `const SKIN_VERSION = "...";` line, so the export stays a separate
 // statement rather than an inline `export const`.
@@ -182,7 +183,9 @@ function parseArgs(argv) {
     else if (arg === "--operation-token") options.operationToken = argv[++i];
     else if (arg === "--reload") options.reload = true;
     else if (arg === "--self-test") options.mode = "self-test";
+    else if (arg === "--require-script-trust") options.requireScriptTrust = true;
     else if (arg === "--check-payload") options.mode = "check-payload";
+    else if (arg === "--trust-theme-script") options.mode = "trust-script";
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!Number.isInteger(options.port) || options.port < 1024 || options.port > 65535) {
@@ -522,7 +525,7 @@ async function loadSafeCss(themeRoot) {
   }
 }
 
-export async function loadTheme(themeDir, preferenceOptions = {}) {
+export async function loadTheme(themeDir, preferenceOptions = {}, scriptOptions = {}) {
   const realThemeDir = await fs.realpath(themeDir);
   const themePath = path.join(realThemeDir, "theme.json");
   const themeText = await fs.readFile(themePath, "utf8");
@@ -532,6 +535,13 @@ export async function loadTheme(themeDir, preferenceOptions = {}) {
   }
   if (raw.schemaVersion !== 1) {
     throw new Error("Theme must use schemaVersion 1");
+  }
+  if (raw.script !== undefined && raw.script !== "theme.js") throw new Error("Theme script must be theme.js");
+  const script = await readThemeScript(realThemeDir);
+  if (script && raw.script !== "theme.js") throw new Error("Unexpected undeclared theme.js");
+  if (raw.script && !script) throw new Error("Declared theme.js is missing");
+  if (script && !scriptOptions.allowUntrustedScript && !(await isThemeScriptTrusted(script.sha256, scriptOptions))) {
+    throw new Error("Theme script is not trusted. Review it, then use --trust-theme-script --theme-dir <reviewed-theme-folder>.");
   }
   const image = normalizedText(raw.image, "image", null, 240);
   if (!image || path.isAbsolute(image)) throw new Error("Theme image must be a relative path");
@@ -591,6 +601,7 @@ export async function loadTheme(themeDir, preferenceOptions = {}) {
     colors,
   };
   const userTransparency = await readThemeTransparency(theme.id, { preferencesPath: themePreferencesPath("win32"), ...preferenceOptions });
+  if (script) { theme.script = "theme.js"; theme.scriptSha256 = script.sha256; }
   if (userTransparency !== undefined) theme.userTransparency = userTransparency;
   const [themeStat, imageStat, safeCss] = await Promise.all([
     fs.stat(themePath),
@@ -611,14 +622,15 @@ export async function loadTheme(themeDir, preferenceOptions = {}) {
     throw new Error("Theme image metadata is invalid or exceeds the 16384px / 50MP safety limit");
   }
   theme.artMetadata = artMetadata;
-  const fingerprint = createHash("sha256")
+  const fingerprintBuilder = createHash("sha256")
     .update(themeText, "utf8")
     .update(JSON.stringify({ userTransparency: theme.userTransparency }))
     .update("\0")
     .update(imageBytes)
     .update("\0")
-    .update(safeCss?.source ?? "")
-    .digest("hex");
+    .update(safeCss?.source ?? "");
+  if (script) fingerprintBuilder.update("\0theme.js\0").update(script.sha256);
+  const fingerprint = fingerprintBuilder.digest("hex");
   return {
     theme,
     themePath,
@@ -628,14 +640,16 @@ export async function loadTheme(themeDir, preferenceOptions = {}) {
     safeCssRuntime: safeCss?.runtimeSource ?? "",
     safeCssPath: safeCss?.path ?? null,
     safeCssStatus: safeCss ? "validated" : "none",
+    script,
     fingerprint,
     sourceStamp: `${themeStat.size}:${themeStat.mtimeMs}:${imageStat.size}:${imageStat.mtimeMs}:` +
-      (safeCss ? `${safeCss.stat.size}:${safeCss.stat.mtimeMs}` : "none"),
+      (safeCss ? `${safeCss.stat.size}:${safeCss.stat.mtimeMs}` : "none") +
+      (script ? `:theme.js:${script.stat.size}:${script.stat.mtimeMs}` : ""),
   };
 }
 
-export async function loadPayload(themeDir = path.join(root, "assets"), candidateTheme = null) {
-  const loadedTheme = candidateTheme ?? await loadTheme(themeDir);
+export async function loadPayload(themeDir = path.join(root, "assets"), candidateTheme = null, scriptOptions = {}) {
+  const loadedTheme = candidateTheme ?? await loadTheme(themeDir, {}, scriptOptions);
   const [css, template] = await Promise.all([
     fs.readFile(path.join(root, "assets", "dream-skin.css"), "utf8"),
     fs.readFile(path.join(root, "assets", "renderer-inject.js"), "utf8"),
@@ -668,11 +682,14 @@ export async function loadPayload(themeDir = path.join(root, "assets"), candidat
     .replace("__DREAM_SKIN_THEME_JSON__", () => JSON.stringify(loadedTheme.theme))
     .replace("__DREAM_SKIN_VERSION_JSON__", () => JSON.stringify(SKIN_VERSION))
     .replace("__DREAM_SKIN_STYLE_REVISION_JSON__", () => JSON.stringify(styleRevision))
-    .replace("__DREAM_SKIN_PAYLOAD_REVISION_JSON__", () => JSON.stringify(revision));
+    .replace("__DREAM_SKIN_PAYLOAD_REVISION_JSON__", () => JSON.stringify(revision))
+    .replace("__DREAM_SKIN_THEME_SCRIPT__", () => loadedTheme.script ? `function(api) {\n${loadedTheme.script.source}\n}` : "null");
   // Defence in depth for every caller, not just --check-payload: a template
   // splice leaves an unreplaced placeholder token behind and usually breaks the
   // syntax outright, so refuse to hand a corrupted script to the renderer.
-  if (/__DREAM_SKIN_[A-Z0-9_]+_JSON__/.test(payload)) {
+  const integrityPayload = loadedTheme.script
+    ? payload.replace(`function(api) {\n${loadedTheme.script.source}\n}`, "null") : payload;
+  if (/__DREAM_SKIN_(?:[A-Z0-9_]+_JSON|THEME_SCRIPT)__/.test(integrityPayload)) {
     throw new Error("Payload placeholders were not fully replaced");
   }
   try {
@@ -697,16 +714,18 @@ async function fileExists(filePath) {
 }
 
 async function readThemeSourceStamp(loadedTheme) {
-  const [themeStat, imageStat, cssStat] = await Promise.all([
+  const [themeStat, imageStat, cssStat, scriptStat] = await Promise.all([
     fs.stat(loadedTheme.themePath),
     fs.stat(loadedTheme.imagePath),
     fs.stat(path.join(path.dirname(loadedTheme.themePath), "theme.css")).catch((error) => {
       if (error.code === "ENOENT") return null;
       throw error;
     }),
+    loadedTheme.script ? fs.stat(path.join(path.dirname(loadedTheme.themePath), "theme.js")) : null,
   ]);
   return `${themeStat.size}:${themeStat.mtimeMs}:${imageStat.size}:${imageStat.mtimeMs}:` +
-    (cssStat ? `${cssStat.size}:${cssStat.mtimeMs}` : "none");
+    (cssStat ? `${cssStat.size}:${cssStat.mtimeMs}` : "none") +
+    (scriptStat ? `:theme.js:${scriptStat.size}:${scriptStat.mtimeMs}` : "");
 }
 
 async function probeSession(session) {
@@ -878,14 +897,18 @@ export function earlyPayloadFor(payload, revision) {
     const generationKey = "__CODEX_DREAM_SKIN_EARLY_GENERATION__";
     const appliedKey = "__CODEX_DREAM_SKIN_EARLY_APPLIED__";
     const generation = ${JSON.stringify(revision)};
+    const initialInstallToken = window.__CODEX_DREAM_SKIN_STATE__?.installToken;
     window[generationKey] = generation;
     let bootstrapTimer = null;
     let timeout = null;
+    let stopped = false;
     const stop = () => {
+      stopped = true;
       if (bootstrapTimer) clearInterval(bootstrapTimer);
       bootstrapTimer = null;
       if (timeout) clearTimeout(timeout);
       timeout = null;
+      document.removeEventListener?.("DOMContentLoaded", install);
     };
     const hasCodexSurface = () => {
       if (location.protocol !== "app:") return false;
@@ -904,7 +927,9 @@ export function earlyPayloadFor(payload, revision) {
         (genericMain && genericInput && branded));
     };
     const install = () => {
+      if (stopped) return true;
       if (window[generationKey] !== generation) { stop(); return true; }
+      if (window.__CODEX_DREAM_SKIN_STATE__?.installToken !== initialInstallToken) { stop(); return true; }
       const root = document.documentElement;
       // The shared renderer can install against documentElement before body is
       // committed; requiring body here would create a visible unskinned first
@@ -1106,11 +1131,14 @@ async function presentOperationUi(session, token, state, message, timeoutMs = 10
 
 async function removeFromSession(session) {
   return session.evaluate(`(() => {
+    window.__CODEX_DREAM_SKIN_EARLY_GENERATION__ = 'disabled:remove';
+    delete window.__CODEX_DREAM_SKIN_EARLY_APPLIED__;
     window.__CODEX_DREAM_SKIN_DISABLED__ = true;
     const state = window.__CODEX_DREAM_SKIN_STATE__;
     let cleaned = false;
     try { cleaned = Boolean(state?.cleanup && state.cleanup()); } catch {}
     if (cleaned) return true;
+    try { state?.cleanupScript?.(); } catch {}
     const root = document.documentElement;
     for (const attribute of [...(root?.attributes || [])]) {
       if (attribute.name.startsWith('data-dream-')) root.removeAttribute(attribute.name);
@@ -1260,6 +1288,8 @@ export async function verifySession(
       expectedVersion: ${JSON.stringify(SKIN_VERSION)},
       themeId: runtime?.themeId ?? null,
       revision: runtime?.revision ?? null,
+      hasThemeScript: Boolean(runtime?.hasThemeScript),
+      script: runtime?.script ?? null,
       styleMode: runtime?.styleMode ?? null,
       stylePresent: Boolean(adopted || fallback),
       scope: runtime?.scope ?? null,
@@ -1343,7 +1373,7 @@ export async function verifySession(
     result.pass = result.installed && result.version === result.expectedVersion &&
       result.stylePresent && result.businessClassPollution === 0 && !result.documentOverflow.x &&
       windowPass && documentPass && viewportPass && structurePass &&
-      payloadPass && homePass;
+      payloadPass && homePass && (!result.hasThemeScript || result.script?.state === "ready");
     return result;
   })()`);
 }
@@ -1653,8 +1683,8 @@ async function runWatch(options) {
           try {
             const previousEarlyScript = earlyScripts.get(id);
             if (paused) {
-              await removeFromSession(session);
               await removeEarlyPayload(session, previousEarlyScript);
+              await removeFromSession(session);
               earlyScripts.delete(id);
               fallbackTargets.delete(id);
               fallbackListeners.delete(id);
@@ -1837,12 +1867,10 @@ if (path.resolve(process.argv[1] || "") === path.resolve(scriptPath)) {
     throw new Error("Screenshot capture must not dispatch renderer input events");
   }
   console.log(JSON.stringify({ pass: true, version: SKIN_VERSION, test: "loopback-cdp-validation" }));
+  } else if (options.mode === "trust-script") {
+    console.log(JSON.stringify({ trusted: true, ...(await trustThemeScript(options.themeDir)) }));
   } else if (options.mode === "check-payload") {
-    const loaded = await loadPayload(options.themeDir);
-    const unresolved = /__DREAM_SKIN_[A-Z0-9_]+_JSON__/.test(loaded.payload);
-    if (unresolved) {
-      throw new Error("Payload placeholders were not fully replaced");
-    }
+    const loaded = await loadPayload(options.themeDir, null, { allowUntrustedScript: !options.requireScriptTrust });
     console.log(JSON.stringify({
       pass: true,
       version: SKIN_VERSION,

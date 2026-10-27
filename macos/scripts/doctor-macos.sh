@@ -21,6 +21,7 @@ for required in \
   "$PROJECT_ROOT/assets/safe-css-validator.mjs" \
   "$PROJECT_ROOT/assets/selectors.json" \
   "$PROJECT_ROOT/assets/theme-package-validator.mjs" \
+  "$PROJECT_ROOT/assets/theme-script.mjs" \
   "$PROJECT_ROOT/assets/theme.json" \
   "$PROJECT_ROOT/scripts/injector.mjs" \
   "$PROJECT_ROOT/scripts/validate-safe-css-file.mjs"; do

@@ -17,6 +17,14 @@ Apply a reversible renderer skin through Chromium DevTools Protocol while launch
 6. Inspect the screenshot against `references/qa-inventory.md`. Verify both the home screen and a normal task before signing off.
 7. Run `scripts/restore-dream-skin.ps1` to remove the live skin, close the saved CDP session, and reopen Codex normally. Add `-RestoreBaseTheme` to restore only saved appearance keys, `-RecoverConfigBackup` for explicit byte-for-byte recovery of a damaged config, or `-Uninstall` to delete shortcuts. A completed config restore archives that install's backup so a later install captures a fresh baseline.
 
+### Optional trusted local scripts (this fork, client 1.5.22+)
+
+- A theme may opt in with `"script": "theme.js"` while keeping `schemaVersion: 1`. Its manifest must register the script's application/javascript media type, bytes and SHA-256, use Skin API 2, declare `theme-script`, and require client 1.5.22 or newer. Simplified three-file ZIPs cannot carry scripts.
+- Import only saves. Review the complete script before explicitly granting its exact SHA-256 with `node scripts/injector.mjs --trust-theme-script --theme-dir <reviewed-saved-theme-directory>` from this platform directory. The grant command does not execute it. Do not infer authorization to trust third-party scripts from an import or selection request; changed bytes require a new grant.
+- Select the saved theme after trust. Scripts run once per generation; A → B → A cleans up and remounts, reload mounts again, and Restore aborts the script and runs its registered cleanup. A returned promise must settle successfully before verification can report ready.
+- Scripts can access the page and chat content; this API is not a sandbox. Authors must register every resource with `api.onCleanup` and guard asynchronous work with `api.signal`.
+- The current upstream client and online gallery/Studio do not support this extension. See [`docs/theme-scripts.md`](../docs/theme-scripts.md) and the [fork Releases](https://github.com/JacobZyy/Codex-Dream-Skin/releases) for compatible builds; do not describe local testing as a public release.
+
 ## Guardrails
 
 - Preserve the official executable, package signature, user threads, pets, plugins, and authentication state.

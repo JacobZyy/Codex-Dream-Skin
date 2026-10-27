@@ -43,6 +43,19 @@
 `~/Library/Application Support/CodexDreamSkinStudio/themes/`，再重新打开菜单。不要只移动图片，
 也不要让目录里再套一层主题目录。手动目录不经过 ZIP 导入器的归档校验，请只移动可信内容。
 
+## 可选的本地可信脚本主题
+
+本 fork 的 1.5.22 版本线支持主题自带可选 `theme.js`，普通图片/CSS 主题无需改变使用方式。脚本包须使用
+manifest API 2、声明 `theme-script` 能力并要求客户端至少为 1.5.22；简化三文件 ZIP 不接受脚本。
+
+导入只保存主题，不执行脚本，也不会替你授权。第三方脚本拥有 Codex 页面与聊天内容的访问权限；先审查代码，
+再按[脚本文档](theme-scripts.md#review-trust-and-apply)使用开发者命令对精确 SHA-256 显式授信，最后从已保存主题中选择。
+授信命令本身也不执行脚本；脚本字节改变后，需要重新审查和授信。菜单没有自动授信入口。
+
+切换 A → B → A 时会清理前一代并重新运行 A，页面重载后会重新挂载当前脚本；恢复原状时会先中止并执行脚本
+登记的清理。脚本作者须登记全部资源。现有上游客户端与在线图库/Studio 尚不支持此扩展，请使用兼容的 fork 构建；
+可下载版本以 [fork Releases](https://github.com/JacobZyy/Codex-Dream-Skin/releases) 为准。
+
 ## 从网站一键换肤
 
 安装支持一键换肤的客户端版本后，DreamSkin.cc 只会在已经审核并通过新版主题包校验的主题上显示

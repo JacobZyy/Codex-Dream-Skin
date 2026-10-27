@@ -164,12 +164,16 @@ macOS 菜单栏和 Windows 托盘都有「主题库 Gallery」和「在线 Studi
 
 从 DreamSkin.cc 装主题优先用[一键换肤](#主题库与社区)。下面是手动导入 `.zip` 的兜底路径，也适用于任何其他来源的主题包。
 
+本 fork 的 1.5.22 版本线还支持可选的本地可信 `theme.js`。导入只保存主题，不执行脚本，也不自动授信；审查代码并对其精确 SHA-256 显式授信后，再从已保存主题中选择应用。A → B → A 与页面重载会重新挂载脚本，恢复原状时会中止并执行其登记的清理。脚本可以访问 Codex 页面和聊天内容。现有上游客户端与在线图库尚不支持这一扩展，具体步骤见[脚本契约与授信命令](./docs/theme-scripts.md)，兼容构建以 [fork Releases](https://github.com/JacobZyy/Codex-Dream-Skin/releases) 为准。
+
 <details>
 <summary><strong>展开完整导入契约</strong> —— 支持的格式、校验项与上限</summary>
 
 在 macOS 菜单栏选择“导入主题 ZIP…”，或在 Windows 托盘选择同名菜单。只支持普通 `.zip`，不支持 `.dreamskin` 后缀，也不要仅改后缀伪装。
 
 正式 Studio 主题包包含 `manifest.json`、`theme.json`、非空 `theme.css` 和恰好一张 `background.webp|jpg|png`；还可包含 `LICENSE.txt` 和预留的 `manifest.sig`。这些文件可以位于 ZIP 根目录或唯一一层主题目录。导入器会核对适用平台、最低客户端版本，以及清单中每个负载文件的大小和 SHA-256。`theme.css` 必须通过本机 Safe CSS 校验，导入后只会作用于 12 个注册部件；每次切换 / 应用仍会重新校验。`manifest.sig` 当前不参与签名验证。
+
+本地脚本包还须在清单中注册 `theme.js`，使用 `skinApiVersion: 2`、声明 `theme-script` 能力，并要求客户端至少为 1.5.22。`theme.json` 仍使用 `schemaVersion: 1`，通过 `"script": "theme.js"` 选择启用。脚本必须为非空 UTF-8，最大 6 MiB，导入时核对登记的字节数和 SHA-256。下述简化格式不接受脚本。
 
 本地简化 ZIP 也必须恰好包含非空 `theme.json`、非空 `theme.css` 和其引用图片；该格式没有正式清单的完整性与兼容性声明，只应从可信来源使用。压缩包最大 32 MiB、最多 32 个条目、解压后最多 64 MiB。
 
@@ -195,6 +199,7 @@ macOS 菜单栏和 Windows 托盘都有「主题库 Gallery」和「在线 Studi
 
 - Mac：[`macos/README.md`](./macos/README.md) · Windows：[`windows/README.md`](./windows/README.md)（[英文版](./windows/README.en.md)）
 - 路径对照：[`docs/platforms.md`](./docs/platforms.md)
+- 可选本地脚本、精确 hash 授信与生命周期 API：[`docs/theme-scripts.md`](./docs/theme-scripts.md)
 - 可直接复制的参考生图模板：[`docs/reference-background-prompt-guide.md`](./docs/reference-background-prompt-guide.md) · 八种概念方向详细提示词：[`docs/background-generation-prompts.md`](./docs/background-generation-prompts.md)
 - 项目记录：[`docs/PROJECT.md`](./docs/PROJECT.md)
 
@@ -205,6 +210,7 @@ macOS 菜单栏和 Windows 托盘都有「主题库 Gallery」和「在线 Studi
 
 ## 安全边界
 
+- 可信 `theme.js` 是可执行的页面代码，超出 Safe CSS 的限制范围。第三方脚本必须先审查，再对精确 hash 授信；字节变化后需重新授信。切走主题或恢复原状时会中止脚本并执行其登记的清理函数；作者须登记全部资源，脚本 API 不是沙箱。
 - CDP 只绑 `127.0.0.1`，但**没有身份认证**；同一台电脑上的其他进程仍可能连接并读取或控制 renderer。
 - 暂停主题或只停止 injector 不会关闭已启动 Codex 的调试端口；使用完整 Restore / 重启，或退出全部 Codex 后从官方普通入口重新打开，风险窗口才结束。
 - 不修改官方安装目录与代码签名。

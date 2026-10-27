@@ -13,6 +13,7 @@ import {
   normalizeThemeText,
 } from "../assets/theme-package-validator.mjs";
 import { decodeAndValidateSafeCss } from "../assets/safe-css-validator.mjs";
+import { readThemeScript, isThemeScriptTrusted, trustThemeScript } from "../assets/theme-script.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptPath = fileURLToPath(import.meta.url);
@@ -44,7 +45,7 @@ const stableTestidLiteral = (testid) => {
   }
   return JSON.stringify(`[data-testid="${testid}"]`);
 };
-const SKIN_VERSION = "1.5.21";
+const SKIN_VERSION = "1.5.22";
 // .github/workflows/ci.yml's version-consistency check greps this file for a
 // literal `const SKIN_VERSION = "...";` line, so the export stays a separate
 // statement rather than an inline `export const`.
@@ -251,7 +252,8 @@ export function assessRendererVerification(renderer, nativeWindow, expected) {
     && (nativeWindowPass || fallbackWindowPass);
   const basePass = result.installed && result.version === expected.skinVersion
     && result.stylePresent && result.businessClassPollution === 0
-    && structurePass && windowPass && !result.documentOverflow?.x;
+    && structurePass && windowPass && !result.documentOverflow?.x
+    && (!result.hasThemeScript || result.script?.state === "ready");
   const payloadPass = (!expected.expectedThemeId || result.themeId === expected.expectedThemeId)
     && (!expected.expectedRevision || result.revision === expected.expectedRevision);
   const visibleSuggestionLabels = Array.isArray(result.suggestionLabels)
@@ -311,7 +313,9 @@ function parseArgs(argv) {
     else if (arg === "--remove") options.mode = "remove";
     else if (arg === "--begin-operation") options.mode = "begin-operation";
     else if (arg === "--finish-operation") options.mode = "finish-operation";
+    else if (arg === "--require-script-trust") options.requireScriptTrust = true;
     else if (arg === "--check-payload") options.mode = "check";
+    else if (arg === "--trust-theme-script") options.mode = "trust-script";
     else if (arg === "--timeout-ms") options.timeoutMs = Number(argv[++i]);
     else if (arg === "--screenshot") options.screenshot = path.resolve(argv[++i]);
     else if (arg === "--theme-dir") options.themeDir = path.resolve(argv[++i]);
@@ -640,7 +644,7 @@ async function loadSafeCss(assetsRoot) {
   }
 }
 
-export async function loadTheme(themeDir, preferenceOptions = {}) {
+export async function loadTheme(themeDir, preferenceOptions = {}, scriptOptions = {}) {
   const requestedRoot = themeDir ?? path.join(root, "assets");
   const configPath = path.join(requestedRoot, "theme.json");
   let assetsRoot;
@@ -674,6 +678,13 @@ export async function loadTheme(themeDir, preferenceOptions = {}) {
     throw new Error(`${configPath} has an invalid image field`);
   }
   if (path.basename(raw.image) !== raw.image) throw new Error("Theme image must stay inside its theme directory");
+  if (raw.script !== undefined && raw.script !== "theme.js") throw new Error("Theme script must be theme.js");
+  const script = await readThemeScript(assetsRoot);
+  if (script && raw.script !== "theme.js") throw new Error("Unexpected undeclared theme.js");
+  if (raw.script && !script) throw new Error("Declared theme.js is missing");
+  if (script && !scriptOptions.allowUntrustedScript && !(await isThemeScriptTrusted(script.sha256, scriptOptions))) {
+    throw new Error("Theme script is not trusted. Review it, then use --trust-theme-script --theme-dir <reviewed-theme-folder>.");
+  }
   const choice = (value, name, choices) => {
     if (value === undefined) return undefined;
     if (typeof value !== "string" || !choices.includes(value)) {
@@ -732,6 +743,7 @@ export async function loadTheme(themeDir, preferenceOptions = {}) {
     },
   };
   const userTransparency = await readThemeTransparency(theme.id, { preferencesPath: themePreferencesPath("darwin"), ...preferenceOptions });
+  if (script) { theme.script = "theme.js"; theme.scriptSha256 = script.sha256; }
   if (userTransparency !== undefined) theme.userTransparency = userTransparency;
   if (appearance !== undefined) theme.appearance = appearance;
   if (Object.values(art).some((value) => value !== undefined)) {
@@ -784,6 +796,7 @@ export async function loadTheme(themeDir, preferenceOptions = {}) {
       safeCssRuntime: safeCss?.runtimeSource ?? "",
       safeCssPath: safeCss?.path ?? null,
       safeCssStatus: safeCss ? "validated" : "none",
+      script,
       theme,
     };
   } finally {
@@ -810,14 +823,14 @@ function invalidateStaticPayloadAssets() {
   staticPayloadAssets = null;
 }
 
-export async function loadPayload(themeDir, preferenceOptions = {}) {
+export async function loadPayload(themeDir, preferenceOptions = {}, scriptOptions = {}) {
   const startedAt = performance.now();
   const [staticAssets, loaded] = await Promise.all([
     loadStaticPayloadAssets(),
-    loadTheme(themeDir, preferenceOptions),
+    loadTheme(themeDir, preferenceOptions, scriptOptions),
   ]);
   const { css, template } = staticAssets;
-  const { art, extension, safeCssRuntime, safeCssStatus, theme } = loaded;
+  const { art, extension, safeCssRuntime, safeCssStatus, theme, script } = loaded;
   const combinedCss = safeCssRuntime ? `${css}\n${safeCssRuntime}\n` : css;
   const styleRevision = createHash("sha256").update(combinedCss).digest("hex").slice(0, 20);
   const artMetadata = readImageMetadata(art, extension);
@@ -847,9 +860,11 @@ export async function loadPayload(themeDir, preferenceOptions = {}) {
     .replace("__DREAM_SKIN_THEME_JSON__", () => JSON.stringify(theme))
     .replace("__DREAM_SKIN_VERSION_JSON__", () => JSON.stringify(SKIN_VERSION))
     .replace("__DREAM_SKIN_STYLE_REVISION_JSON__", () => JSON.stringify(styleRevision))
-    .replace("__DREAM_SKIN_PAYLOAD_REVISION_JSON__", () => JSON.stringify(revision));
-  assertPayloadIntegrity(payload);
+    .replace("__DREAM_SKIN_PAYLOAD_REVISION_JSON__", () => JSON.stringify(revision))
+    .replace("__DREAM_SKIN_THEME_SCRIPT__", () => script ? `function(api) {\n${script.source}\n}` : "null");
+  assertPayloadIntegrity(payload, script?.source);
   return {
+    script,
     imageBytes: art.length,
     payload,
     revision,
@@ -871,8 +886,10 @@ export async function loadPayload(themeDir, preferenceOptions = {}) {
 // The second assertion is deliberately generic: it catches any corruption of
 // the template, not only the `$` replacement patterns that motivated it.
 // `new Script` compiles without running the payload, so nothing executes here.
-export function assertPayloadIntegrity(payload) {
-  if (/__DREAM_SKIN_[A-Z0-9_]+_JSON__/.test(payload)) {
+export function assertPayloadIntegrity(payload, scriptSource = null) {
+  const integrityPayload = scriptSource === null ? payload
+    : payload.replace(`function(api) {\n${scriptSource}\n}`, "null");
+  if (/__DREAM_SKIN_(?:[A-Z0-9_]+_JSON|THEME_SCRIPT)__/.test(integrityPayload)) {
     throw new Error("Payload placeholders were not fully replaced");
   }
   try {
@@ -1056,6 +1073,7 @@ async function removeFromSession(session) {
     let cleaned = false;
     try { cleaned = Boolean(state?.cleanup && state.cleanup()); } catch {}
     if (cleaned) return true;
+    try { state?.cleanupScript?.(); } catch {}
     const root = document.documentElement;
     for (const attribute of [...(root?.attributes || [])]) {
       if (attribute.name.startsWith('data-dream-')) root.removeAttribute(attribute.name);
@@ -1221,6 +1239,8 @@ export async function verifySession(session, expectedThemeId = null, expectedRev
       version: runtime?.version ?? null,
       themeId: runtime?.themeId ?? null,
       revision: runtime?.revision ?? null,
+      hasThemeScript: Boolean(runtime?.hasThemeScript),
+      script: runtime?.script ?? null,
       styleMode: runtime?.styleMode ?? null,
       stylePresent: Boolean(adopted || fallback),
       scope: runtime?.scope ?? null,
@@ -1508,14 +1528,18 @@ export function earlyPayloadFor(payload, revision) {
     const generationKey = "__CODEX_DREAM_SKIN_EARLY_GENERATION__";
     const appliedKey = "__CODEX_DREAM_SKIN_EARLY_APPLIED__";
     const generation = ${JSON.stringify(revision)};
+    const initialInstallToken = window.__CODEX_DREAM_SKIN_STATE__?.installToken;
     window[generationKey] = generation;
     let bootstrapTimer = null;
     let timeout = null;
+    let stopped = false;
     const stop = () => {
+      stopped = true;
       if (bootstrapTimer) clearInterval(bootstrapTimer);
       bootstrapTimer = null;
       if (timeout) clearTimeout(timeout);
       timeout = null;
+      document.removeEventListener?.("DOMContentLoaded", install);
     };
     const hasCodexSurface = () => {
       if (location.protocol !== "app:") return false;
@@ -1534,7 +1558,9 @@ export function earlyPayloadFor(payload, revision) {
         (genericMain && genericInput && branded));
     };
     const install = () => {
+      if (stopped) return true;
       if (window[generationKey] !== generation) { stop(); return true; }
+      if (window.__CODEX_DREAM_SKIN_STATE__?.installToken !== initialInstallToken) { stop(); return true; }
       if (!document.documentElement || !hasCodexSurface()) return false;
       stop();
       ${payload};
@@ -2218,12 +2244,15 @@ async function runOneShotAndExit(options) {
 if (path.resolve(process.argv[1] || "") === path.resolve(scriptPath)) {
   try {
     const options = parseArgs(process.argv.slice(2));
-    if (options.mode === "check") {
-      const loaded = await loadPayload(options.themeDir);
+    if (options.mode === "trust-script") {
+      if (!options.themeDir) throw new Error("--trust-theme-script requires --theme-dir");
+      console.log(JSON.stringify({ trusted: true, ...(await trustThemeScript(options.themeDir)) }));
+    } else if (options.mode === "check") {
+      const loaded = await loadPayload(options.themeDir, {}, { allowUntrustedScript: !options.requireScriptTrust });
       // loadPayload already fails closed, but every installer, importer and
       // theme switch gates on this command, so the guard is re-asserted at the
       // CLI boundary rather than being an internal implementation detail.
-      assertPayloadIntegrity(loaded.payload);
+      assertPayloadIntegrity(loaded.payload, loaded.script?.source);
       console.log(JSON.stringify({
         pass: true,
         version: SKIN_VERSION,

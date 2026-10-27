@@ -3,6 +3,7 @@
 }
 
 $script:DreamSkinMaxImageBytes = 10 * 1024 * 1024
+$script:DreamSkinMaxThemeScriptBytes = 6 * 1024 * 1024
 $script:DreamSkinMaxThemeArchiveBytes = 32 * 1024 * 1024
 $script:DreamSkinMaxThemeArchiveExpandedBytes = 64 * 1024 * 1024
 $script:DreamSkinMaxThemeArchiveEntries = 32
@@ -387,6 +388,53 @@ function Test-DreamSkinThemePathWithin {
   }
 }
 
+function Assert-DreamSkinThemeScriptFile {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  Assert-DreamSkinNoReparseComponents -Path $Path
+  $stream = [System.IO.FileStream]::new(
+    $Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+  try {
+    $length = $stream.Length
+    if ($length -lt 1 -or $length -gt $script:DreamSkinMaxThemeScriptBytes) {
+      throw 'Theme script must be non-empty and no larger than 6 MiB.'
+    }
+    $bytes = New-Object byte[] ([int]$length)
+    $offset = 0
+    while ($offset -lt $bytes.Length) {
+      $count = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+      if ($count -eq 0) { break }
+      $offset += $count
+    }
+    if ($offset -ne $length -or $stream.ReadByte() -ne -1 -or $stream.Length -ne $length) {
+      throw 'Theme script changed while being read.'
+    }
+    $source = ConvertFrom-DreamSkinUtf8Bytes -Bytes $bytes -Path $Path
+    if ([string]::IsNullOrWhiteSpace($source)) { throw 'Theme script must not be empty.' }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
+function Resolve-DreamSkinThemeScriptPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$ThemeDirectory,
+    [Parameter(Mandatory = $true)][object]$Theme
+  )
+  $declaration = $Theme.PSObject.Properties['script']
+  $scriptPath = Join-Path $ThemeDirectory 'theme.js'
+  Assert-DreamSkinNoReparseComponents -Path $scriptPath
+  if ($null -eq $declaration) {
+    if (Test-Path -LiteralPath $scriptPath) { throw 'Undeclared theme.js is not allowed.' }
+    return $null
+  }
+  if ($declaration.Name -cne 'script' -or $declaration.Value -isnot [string] -or $declaration.Value -cne 'theme.js') {
+    throw 'Theme script must declare exactly theme.js.'
+  }
+  if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { throw 'Declared theme.js is missing.' }
+  Assert-DreamSkinThemeScriptFile -Path $scriptPath
+  return $scriptPath
+}
+
 function Read-DreamSkinTheme {
   param(
     [Parameter(Mandatory = $true)][string]$ThemeDirectory,
@@ -415,10 +463,12 @@ function Read-DreamSkinTheme {
     throw 'Theme image must remain inside its theme directory and exist.'
   }
   Assert-DreamSkinImageFile -Path $imagePath -SkipImageMetadata:$SkipImageMetadata
+  $scriptPath = Resolve-DreamSkinThemeScriptPath -ThemeDirectory $directory -Theme $theme
   return [pscustomobject]@{
     Directory = $directory
     ThemePath = $themePath
     ImagePath = $imagePath
+    ScriptPath = $scriptPath
     Theme = Normalize-DreamSkinThemeContract -Theme $theme
   }
 }
@@ -465,6 +515,17 @@ function Get-DreamSkinActiveThemeAppearance {
   return 'auto'
 }
 
+function Remove-DreamSkinBundledThemeScript {
+  param([Parameter(Mandatory = $true)][string]$ThemeDirectory)
+  $scriptPath = Join-Path $ThemeDirectory 'theme.js'
+  Assert-DreamSkinNoReparseComponents -Path $scriptPath
+  if (-not (Test-Path -LiteralPath $scriptPath)) { return }
+  if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+    throw 'The bundled theme.js replacement target must be a regular file.'
+  }
+  Remove-Item -LiteralPath $scriptPath -Force -ErrorAction Stop
+}
+
 function Initialize-DreamSkinThemeStore {
   param(
     [Parameter(Mandatory = $true)][string]$SkillRoot,
@@ -477,6 +538,7 @@ function Initialize-DreamSkinThemeStore {
   Invoke-DreamSkinThemeReplacementRecovery -Paths $paths
   $assetRoot = Join-Path $SkillRoot 'assets'
   $bundledTheme = Read-DreamSkinTheme -ThemeDirectory $assetRoot
+  if ($bundledTheme.ScriptPath) { throw 'Bundled preset scripts require a separate explicit installation flow.' }
   $assetImage = $bundledTheme.ImagePath
   $assetImageName = [System.IO.Path]::GetFileName($assetImage)
   $bundledPresetId = "$($bundledTheme.Theme.id)"
@@ -487,6 +549,7 @@ function Initialize-DreamSkinThemeStore {
   Assert-DreamSkinNoReparseComponents -Path $activeTheme
   if (-not (Test-Path -LiteralPath $activeTheme -PathType Leaf)) {
     Ensure-DreamSkinManagedDirectory -Path $paths.Active -Root $paths.Root
+    Remove-DreamSkinBundledThemeScript -ThemeDirectory $paths.Active
     Assert-DreamSkinNoReparseComponents -Path (Join-Path $paths.Active $assetImageName)
     $activeImage = Join-Path $paths.Active $assetImageName
     Copy-Item -LiteralPath $assetImage -Destination $activeImage -Force
@@ -512,6 +575,7 @@ function Initialize-DreamSkinThemeStore {
   # Refresh the saved copy on every run (matching macOS seeding) so preset
   # metadata upgrades — e.g. the #183 appearance pin — reach existing installs.
   Ensure-DreamSkinManagedDirectory -Path $presetDirectory -Root $paths.Root
+  Remove-DreamSkinBundledThemeScript -ThemeDirectory $presetDirectory
   $presetImage = Join-Path $presetDirectory $assetImageName
   Assert-DreamSkinNoReparseComponents -Path $presetImage
   Copy-Item -LiteralPath $assetImage -Destination $presetImage -Force
@@ -529,7 +593,10 @@ function Initialize-DreamSkinThemeStore {
   Assert-DreamSkinNoReparseComponents -Path $gothicTheme
   if ((Test-Path -LiteralPath $gothicSourceTheme -PathType Leaf) -and
     (Test-Path -LiteralPath $gothicSourceImage -PathType Leaf)) {
+    $gothicPack = Read-DreamSkinTheme -ThemeDirectory $gothicSource -SkipImageMetadata
+    if ($gothicPack.ScriptPath) { throw 'Bundled preset scripts require a separate explicit installation flow.' }
     Ensure-DreamSkinManagedDirectory -Path $gothicDirectory -Root $paths.Root
+    Remove-DreamSkinBundledThemeScript -ThemeDirectory $gothicDirectory
     $gothicImage = Join-Path $gothicDirectory 'background.jpg'
     Assert-DreamSkinNoReparseComponents -Path $gothicImage
     Assert-DreamSkinImageFile -Path $gothicSourceImage
@@ -553,9 +620,11 @@ function Initialize-DreamSkinThemeStore {
       (Test-Path -LiteralPath $gothicSourceTheme -PathType Leaf)) { $refreshSource = $gothicSource }
     if ($null -ne $refreshSource) {
       $sourcePack = Read-DreamSkinTheme -ThemeDirectory $refreshSource
+      if ($sourcePack.ScriptPath) { throw 'Bundled preset scripts require a separate explicit installation flow.' }
       $sourceJson = Read-DreamSkinUtf8File -Path $sourcePack.ThemePath
       $activeJson = Read-DreamSkinUtf8File -Path $activeTheme
       if ($sourceJson -cne $activeJson) {
+        Remove-DreamSkinBundledThemeScript -ThemeDirectory $paths.Active
         $sourceImageName = [System.IO.Path]::GetFileName($sourcePack.ImagePath)
         $refreshedImage = Join-Path $paths.Active $sourceImageName
         Assert-DreamSkinNoReparseComponents -Path $refreshedImage
@@ -582,6 +651,7 @@ function Set-DreamSkinActiveTheme {
     [AllowNull()][object]$Theme,
     [string]$Name,
     [AllowNull()][string]$SafeCssPath,
+    [AllowNull()][string]$ScriptPath,
     [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin')
   )
   $paths = Get-DreamSkinThemePaths -StateRoot $StateRoot
@@ -602,11 +672,31 @@ function Set-DreamSkinActiveTheme {
       art = [pscustomobject]@{ focusX = $null; focusY = $null; safeArea = 'auto'; taskMode = 'auto' }
     }
   }
+  $activeScript = Join-Path $paths.Active 'theme.js'
+  Assert-DreamSkinNoReparseComponents -Path $activeScript
+  if ((Test-Path -LiteralPath $activeScript) -and
+    -not (Test-Path -LiteralPath $activeScript -PathType Leaf)) {
+    throw 'The active theme.js target must be a regular file.'
+  }
   $imageName = New-DreamSkinThemeImageName -Extension $extension
   $target = Join-Path $paths.Active $imageName
   $temporary = Join-Path $paths.Active ('.dream-tmp-' + [guid]::NewGuid().ToString('N') + $extension)
   $temporaryCss = $null
+  $temporaryScript = $null
+  $scriptCheckStage = $null
   try {
+    $scriptDeclaration = $Theme.PSObject.Properties['script']
+    if ($ScriptPath) {
+      if ($null -eq $scriptDeclaration -or $scriptDeclaration.Name -cne 'script' -or $scriptDeclaration.Value -isnot [string] -or
+        $scriptDeclaration.Value -cne 'theme.js') { throw 'Theme script must declare exactly theme.js.' }
+      Assert-DreamSkinThemeScriptFile -Path $ScriptPath
+      $temporaryScript = Join-Path $paths.Active ('.dream-tmp-' + [guid]::NewGuid().ToString('N') + '.js')
+      Assert-DreamSkinNoReparseComponents -Path $temporaryScript
+      Copy-Item -LiteralPath $ScriptPath -Destination $temporaryScript -Force
+      Assert-DreamSkinThemeScriptFile -Path $temporaryScript
+    } elseif ($null -ne $scriptDeclaration) {
+      throw 'Declared theme.js source is missing.'
+    }
     if ($SafeCssPath) {
       $safeCssSource = [System.IO.Path]::GetFullPath($SafeCssPath)
       Assert-DreamSkinSafeCssFile -Path $safeCssSource
@@ -620,12 +710,46 @@ function Set-DreamSkinActiveTheme {
     Copy-Item -LiteralPath $source -Destination $temporary -Force
     Assert-DreamSkinNoReparseComponents -Path $temporary
     Assert-DreamSkinImageFile -Path $temporary
+    if ($temporaryScript) {
+      $scriptCheckStage = Join-Path $paths.Root ('.theme-apply-check-' + [guid]::NewGuid().ToString('N'))
+      Ensure-DreamSkinManagedDirectory -Path $scriptCheckStage -Root $paths.Root
+      $candidateImage = Join-Path $scriptCheckStage $imageName
+      Copy-Item -LiteralPath $temporary -Destination $candidateImage -Force
+      Remove-Item -LiteralPath $temporary -Force
+      $temporary = $candidateImage
+      $candidateScript = Join-Path $scriptCheckStage 'theme.js'
+      Copy-Item -LiteralPath $temporaryScript -Destination $candidateScript -Force
+      Remove-Item -LiteralPath $temporaryScript -Force
+      $temporaryScript = $candidateScript
+      if ($temporaryCss) {
+        $candidateCss = Join-Path $scriptCheckStage 'theme.css'
+        Copy-Item -LiteralPath $temporaryCss -Destination $candidateCss -Force
+        Remove-Item -LiteralPath $temporaryCss -Force
+        $temporaryCss = $candidateCss
+      }
+      $candidateTheme = $Theme | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+      $candidateTheme | Add-Member -NotePropertyName image -NotePropertyValue $imageName -Force
+      if ($Name) { $candidateTheme | Add-Member -NotePropertyName name -NotePropertyValue $Name -Force }
+      $candidateTheme = Normalize-DreamSkinThemeContract -Theme $candidateTheme
+      Write-DreamSkinTheme -ThemeDirectory $scriptCheckStage -Theme $candidateTheme
+      $node = Get-DreamSkinNodeRuntime
+      $injector = Join-Path $PSScriptRoot 'injector.mjs'
+      $candidateCheck = Invoke-DreamSkinNative -FilePath $node.Path -ArgumentList @(
+        $injector, '--check-payload', '--require-script-trust', '--theme-dir', $scriptCheckStage) -SeparateStderr
+      if ($candidateCheck.ExitCode -ne 0) {
+        $detail = (($candidateCheck.Output + $candidateCheck.ErrorOutput) -join "`n").Trim()
+        throw $(if ($detail) { $detail } else { 'Theme script must be explicitly trusted before application.' })
+      }
+      $Theme = $candidateTheme
+    }
     Move-Item -LiteralPath $temporary -Destination $target -Force
     Assert-DreamSkinNoReparseComponents -Path $target
     Assert-DreamSkinImageFile -Path $target
-    $Theme | Add-Member -NotePropertyName image -NotePropertyValue $imageName -Force
-    if ($Name) { $Theme | Add-Member -NotePropertyName name -NotePropertyValue $Name -Force }
-    $Theme = Normalize-DreamSkinThemeContract -Theme $Theme
+    if (-not $scriptCheckStage) {
+      $Theme | Add-Member -NotePropertyName image -NotePropertyValue $imageName -Force
+      if ($Name) { $Theme | Add-Member -NotePropertyName name -NotePropertyValue $Name -Force }
+      $Theme = Normalize-DreamSkinThemeContract -Theme $Theme
+    }
     $activeCss = Join-Path $paths.Active 'theme.css'
     Assert-DreamSkinNoReparseComponents -Path $activeCss
     if ($temporaryCss) {
@@ -635,10 +759,19 @@ function Set-DreamSkinActiveTheme {
     } else {
       Remove-Item -LiteralPath $activeCss -Force -ErrorAction SilentlyContinue
     }
+    Assert-DreamSkinNoReparseComponents -Path $activeScript
+    if ($temporaryScript) {
+      Move-Item -LiteralPath $temporaryScript -Destination $activeScript -Force
+      $temporaryScript = $null
+    } elseif (Test-Path -LiteralPath $activeScript) {
+      Remove-Item -LiteralPath $activeScript -Force -ErrorAction Stop
+    }
     Write-DreamSkinTheme -ThemeDirectory $paths.Active -Theme $Theme
   } finally {
     Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     if ($temporaryCss) { Remove-Item -LiteralPath $temporaryCss -Force -ErrorAction SilentlyContinue }
+    if ($temporaryScript) { Remove-Item -LiteralPath $temporaryScript -Force -ErrorAction SilentlyContinue }
+    if ($scriptCheckStage) { Remove-DreamSkinManagedDirectoryVerified -Path $scriptCheckStage -Root $paths.Root }
   }
   $sameImage = $oldImage -and ([System.IO.Path]::GetFullPath($oldImage) -ieq [System.IO.Path]::GetFullPath($target))
   if ($oldImage -and -not $sameImage -and
@@ -672,7 +805,7 @@ function Set-DreamSkinActiveThemeImage {
   }
 
   return Set-DreamSkinActiveTheme -ImagePath $ImagePath -Theme $theme `
-    -SafeCssPath $safeCssPath -StateRoot $StateRoot
+    -SafeCssPath $safeCssPath -ScriptPath $current.ScriptPath -StateRoot $StateRoot
 }
 
 function Save-DreamSkinCurrentTheme {
@@ -702,6 +835,10 @@ function Save-DreamSkinCurrentTheme {
   $theme.id = $id
   $theme.name = $trimmed
   $theme.image = $imageName
+  if ($active.ScriptPath) {
+    Copy-Item -LiteralPath $active.ScriptPath -Destination (Join-Path $destination 'theme.js') -Force
+    Assert-DreamSkinThemeScriptFile -Path (Join-Path $destination 'theme.js')
+  }
   Write-DreamSkinTheme -ThemeDirectory $destination -Theme $theme
   $activeCss = Join-Path $paths.Active 'theme.css'
   if (Test-Path -LiteralPath $activeCss -PathType Leaf) {
@@ -744,6 +881,9 @@ function Get-DreamSkinThemeSemanticFingerprint {
     }
     $combined += "`0LICENSE.txt`0" + (Get-FileHash -LiteralPath $licensePath -Algorithm SHA256).Hash.ToLowerInvariant()
   }
+  if ($loaded.ScriptPath) {
+    $combined += "`0theme.js`0" + (Get-FileHash -LiteralPath $loaded.ScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
   $combinedBytes = [System.Text.Encoding]::UTF8.GetBytes($combined)
   $combinedHasher = [System.Security.Cryptography.SHA256]::Create()
   try {
@@ -763,6 +903,7 @@ function Test-DreamSkinThemeDirectoryHasOnlyRuntimeFiles {
       'theme.css', 'LICENSE.txt')) {
     $null = $allowed.Add($name)
   }
+  if ($loaded.ScriptPath) { $null = $allowed.Add('theme.js') }
   foreach ($entry in Get-ChildItem -LiteralPath $loaded.Directory -Force -ErrorAction Stop) {
     Assert-DreamSkinNoReparseComponents -Path $entry.FullName
     if ($entry.PSIsContainer -or -not $allowed.Contains($entry.Name)) { return $false }
@@ -934,6 +1075,9 @@ function Get-DreamSkinSourceThemeIdentity {
   }
   $identity = "dreamskin-source-theme-fallback/1`0theme.json`0$themeHash" +
     "`0image`0$imageHash`0theme.css`0$cssIdentity`0LICENSE.txt`0$licenseIdentity"
+  if ($LoadedTheme.ScriptPath) {
+    $identity += "`0theme.js`0" + (Get-FileHash -LiteralPath $LoadedTheme.ScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
   $identityBytes = [System.Text.Encoding]::UTF8.GetBytes($identity)
   $identityHasher = [System.Security.Cryptography.SHA256]::Create()
   try {
@@ -977,6 +1121,9 @@ function Get-DreamSkinThemeRuntimeContentFingerprint {
     $cssIdentity = (Get-FileHash -LiteralPath $cssPath -Algorithm SHA256).Hash.ToLowerInvariant()
   }
   $identity = "dreamskin-runtime-theme/1`0theme.json`0$themeHash`0image`0$imageHash`0theme.css`0$cssIdentity"
+  if ($loaded.ScriptPath) {
+    $identity += "`0theme.js`0" + (Get-FileHash -LiteralPath $loaded.ScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
   $identityBytes = [System.Text.Encoding]::UTF8.GetBytes($identity)
   $identityHasher = [System.Security.Cryptography.SHA256]::Create()
   try {
@@ -1231,7 +1378,7 @@ function Expand-DreamSkinThemeZipSecurely {
   if ($hasManifest) {
     $officialNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($name in @(
-      'manifest.json', 'manifest.sig', 'theme.json', 'theme.css', 'LICENSE.txt',
+      'manifest.json', 'manifest.sig', 'theme.json', 'theme.css', 'theme.js', 'LICENSE.txt',
       'background.webp', 'background.jpg', 'background.png'
     )) { $null = $officialNames.Add($name) }
     foreach ($sourceFile in $sourceFiles) {
@@ -1942,7 +2089,7 @@ function Import-DreamSkinThemeZip {
     $theme.id = $id
     $theme.image = $imageName
     Write-DreamSkinTheme -ThemeDirectory $publishStage -Theme $theme
-    foreach ($auxiliaryName in @('theme.css', 'LICENSE.txt')) {
+    foreach ($auxiliaryName in @('theme.css', 'LICENSE.txt', 'theme.js')) {
       $auxiliarySource = Join-Path $sourceRoot $auxiliaryName
       if (Test-Path -LiteralPath $auxiliarySource -PathType Leaf) {
         Assert-DreamSkinNoReparseComponents -Path $auxiliarySource
@@ -2194,7 +2341,7 @@ function Use-DreamSkinSavedTheme {
   if (-not (Test-Path -LiteralPath $safeCssPath -PathType Leaf)) { $safeCssPath = $null }
   if ($safeCssPath) { Assert-DreamSkinSafeCssFile -Path $safeCssPath }
   return Set-DreamSkinActiveTheme -ImagePath $saved.ImagePath -Theme $theme `
-    -SafeCssPath $safeCssPath -StateRoot $StateRoot
+    -SafeCssPath $safeCssPath -ScriptPath $saved.ScriptPath -StateRoot $StateRoot
 }
 
 function Set-DreamSkinPaused {

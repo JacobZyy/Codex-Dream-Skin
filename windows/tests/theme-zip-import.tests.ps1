@@ -45,6 +45,7 @@ if ($publishedFingerprintIndex -lt 0 -or $publishedMismatchIndex -le $publishedF
 
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) "codex-dream-skin-zip-tests-$PID-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+$originalLocalAppData = $env:LOCALAPPDATA
 
 function Write-TestThemePack {
   param(
@@ -113,6 +114,8 @@ function Write-TestOfficialThemePack {
     [Parameter(Mandatory = $true)][string]$Id,
     [Parameter(Mandatory = $true)][string]$Name,
     [switch]$IncludeOptionalFiles,
+    [switch]$IncludeScript,
+    [AllowEmptyString()][string]$ScriptSource = 'return Promise.resolve();',
     [string]$LicenseText = "CC0-1.0`r`n"
   )
   New-Item -ItemType Directory -Path $Directory -Force | Out-Null
@@ -131,6 +134,7 @@ function Write-TestOfficialThemePack {
       muted = '#9ebdb3'; line = 'rgba(124, 255, 70, .28)'
     }
   }
+  if ($IncludeScript) { $theme.script = 'theme.js' }
   $themePath = Join-Path $Directory 'theme.json'
   [System.IO.File]::WriteAllText(
     $themePath,
@@ -159,6 +163,15 @@ function Write-TestOfficialThemePack {
     sha256 = (Get-FileHash -LiteralPath $cssPath -Algorithm SHA256).Hash.ToLowerInvariant()
   }
   $capabilities += 'safe-css'
+  if ($IncludeScript) {
+    $scriptPath = Join-Path $Directory 'theme.js'
+    [System.IO.File]::WriteAllText($scriptPath, $ScriptSource, [System.Text.UTF8Encoding]::new($false))
+    $files += [ordered]@{
+      path = 'theme.js'; mediaType = 'application/javascript'; bytes = (Get-Item -LiteralPath $scriptPath).Length
+      sha256 = (Get-FileHash -LiteralPath $scriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $capabilities += 'theme-script'
+  }
   if ($IncludeOptionalFiles) {
     $licensePath = Join-Path $Directory 'LICENSE.txt'
     [System.IO.File]::WriteAllText($licensePath, $LicenseText, [System.Text.UTF8Encoding]::new($false))
@@ -172,8 +185,8 @@ function Write-TestOfficialThemePack {
     packageVersion = 1
     themeId = $Id
     version = '1.2.3'
-    skinApiVersion = 1
-    minClientVersion = '1.3.0'
+    skinApiVersion = $(if ($IncludeScript) { 2 } else { 1 })
+    minClientVersion = $(if ($IncludeScript) { '1.5.22' } else { '1.3.0' })
     platforms = @('macos', 'windows')
     capabilities = $capabilities
     publisher = [ordered]@{ id = 'dreamskin-studio'; displayName = 'DreamSkin Studio' }
@@ -375,6 +388,232 @@ try {
   if ($roundtripFingerprint -cne $official.ContentFingerprint) {
     throw 'Active-theme image renaming changed the imported runtime content fingerprint.'
   }
+
+  $scriptStateRoot = Join-Path $temporaryRoot 'script-state'
+  $scriptPaths = Initialize-DreamSkinThemeStore -SkillRoot $Root -StateRoot $scriptStateRoot
+  $scriptSource = Join-Path $temporaryRoot 'script-source'
+  $scriptArchive = Join-Path $temporaryRoot 'script.zip'
+  $scriptText = '/*' + ('a' * (1024 * 1024)) + '*/ return Promise.resolve();'
+  Write-TestOfficialThemePack -Directory $scriptSource -Id 'script-theme' -Name 'Script Theme' `
+    -IncludeScript -ScriptSource $scriptText
+  New-TestZipFromDirectory -Source $scriptSource -Archive $scriptArchive
+  $env:LOCALAPPDATA = Join-Path $temporaryRoot 'script-local-app-data'
+  $scriptImported = Import-DreamSkinThemeZip -ArchivePath $scriptArchive -StateRoot $scriptStateRoot
+  $scriptSaved = Read-DreamSkinTheme -ThemeDirectory $scriptImported.Path
+  if (-not $scriptSaved.ScriptPath -or $scriptSaved.Theme.script -cne 'theme.js' -or
+    (Read-DreamSkinUtf8File -Path $scriptSaved.ScriptPath) -cne $scriptText) {
+    throw 'Script import lost its fixed declaration or script bytes.'
+  }
+  $scriptDuplicate = Import-DreamSkinThemeZip -ArchivePath $scriptArchive -StateRoot $scriptStateRoot
+  if ($scriptDuplicate.Status -cne 'Duplicate' -or $scriptDuplicate.ContentFingerprint -cne $scriptImported.ContentFingerprint) {
+    throw 'Script import duplicate changed content identity.'
+  }
+  $activeBeforeScriptTrust = @(
+    Get-ChildItem -LiteralPath $scriptPaths.Active -File | Sort-Object Name | ForEach-Object {
+      $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+    }
+  ) -join '|'
+  $untrustedScriptError = $null
+  try {
+    $null = Use-DreamSkinSavedTheme -ThemeDirectory $scriptImported.Path -StateRoot $scriptStateRoot
+  } catch { $untrustedScriptError = $_.Exception.Message }
+  $activeAfterScriptTrust = @(
+    Get-ChildItem -LiteralPath $scriptPaths.Active -File | Sort-Object Name | ForEach-Object {
+      $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+    }
+  ) -join '|'
+  if (-not $untrustedScriptError -or $untrustedScriptError -notmatch 'trust' -or
+    $activeBeforeScriptTrust -cne $activeAfterScriptTrust -or
+    @(Get-ChildItem -LiteralPath $scriptPaths.Root -Directory -Filter '.theme-apply-check-*').Count -ne 0) {
+    throw 'Untrusted script application did not fail before active files changed or left private candidate files.'
+  }
+  $scriptTrustPath = Join-Path $env:LOCALAPPDATA 'CodexDreamSkin\script-trust.json'
+  if (Test-Path -LiteralPath $scriptTrustPath) { throw 'Importing or checking a script silently granted trust.' }
+  $scriptNode = Get-DreamSkinNodeRuntime
+  $scriptGrant = Invoke-DreamSkinNative -FilePath $scriptNode.Path -ArgumentList @(
+    (Join-Path $Root 'scripts\injector.mjs'), '--trust-theme-script', '--theme-dir', $scriptImported.Path) -SeparateStderr
+  if ($scriptGrant.ExitCode -ne 0) { throw 'The isolated local test script could not be explicitly trusted.' }
+  $scriptGrantInfo = ($scriptGrant.Output -join "`n") | ConvertFrom-Json
+  if (-not $scriptGrantInfo.trusted -or $scriptGrantInfo.sha256 -cne
+    (Get-FileHash -LiteralPath $scriptSaved.ScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()) {
+    throw 'The isolated trust grant did not bind the exact local test script bytes.'
+  }
+  $scriptActive = Use-DreamSkinSavedTheme -ThemeDirectory $scriptImported.Path -StateRoot $scriptStateRoot
+  if ((Read-DreamSkinUtf8File -Path $scriptActive.ScriptPath) -cne $scriptText -or
+    (Get-DreamSkinThemeRuntimeContentFingerprint -ThemeDirectory $scriptPaths.Active) -cne $scriptImported.ContentFingerprint) {
+    throw 'Script active copy did not retain exact imported runtime identity.'
+  }
+  $scriptActive = Set-DreamSkinActiveThemeImage -ImagePath $officialSaved.ImagePath -StateRoot $scriptStateRoot
+  if ((Read-DreamSkinUtf8File -Path $scriptActive.ScriptPath) -cne $scriptText) {
+    throw 'Change Background dropped the active script.'
+  }
+  $scriptNewSaved = Save-DreamSkinCurrentTheme -Name 'Saved Script' -StateRoot $scriptStateRoot
+  if ((Read-DreamSkinUtf8File -Path $scriptNewSaved.ScriptPath) -cne $scriptText) {
+    throw 'Save Current Theme dropped the active script.'
+  }
+  . (Join-Path $Root 'scripts\apply-community-theme.ps1') -FunctionsOnly
+  $scriptSnapshot = Join-Path $scriptPaths.Root 'script-snapshot'
+  $null = Copy-DreamSkinActiveThemeSnapshot -Paths $scriptPaths -Destination $scriptSnapshot
+  $scriptSnapshotFingerprint = Get-DreamSkinThemeRuntimeContentFingerprint -ThemeDirectory $scriptSnapshot
+  $scriptImportedSnapshot = Join-Path $scriptPaths.Root 'script-imported-snapshot'
+  $null = Copy-DreamSkinImportedThemeSnapshot -SourceDirectory $scriptImported.Path `
+    -Destination $scriptImportedSnapshot -Paths $scriptPaths -ExpectedContentFingerprint $scriptImported.ContentFingerprint
+  if ((Read-DreamSkinUtf8File -Path (Join-Path $scriptImportedSnapshot 'theme.js')) -cne $scriptText) {
+    throw 'Private imported-theme snapshot dropped script bytes.'
+  }
+  $plainInScriptState = Import-DreamSkinThemeZip -ArchivePath $officialArchive -StateRoot $scriptStateRoot
+  $activeScriptTarget = Join-Path $scriptPaths.Active 'theme.js'
+  $activeScriptBackup = Join-Path $scriptPaths.Root 'active-script-before-target-type.js'
+  Move-Item -LiteralPath $activeScriptTarget -Destination $activeScriptBackup
+  New-Item -ItemType Directory -Path $activeScriptTarget | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $activeScriptTarget 'preserve.txt'), 'preserve')
+  $activeConfigBeforeTargetType = Read-DreamSkinUtf8File -Path (Join-Path $scriptPaths.Active 'theme.json')
+  try {
+    foreach ($targetTypeSource in @($plainInScriptState.Path, $scriptImported.Path)) {
+      $targetTypeRejected = $false
+      try {
+        $null = Use-DreamSkinSavedTheme -ThemeDirectory $targetTypeSource -StateRoot $scriptStateRoot
+      } catch { $targetTypeRejected = $true }
+      if (-not $targetTypeRejected -or
+        -not (Test-Path -LiteralPath $activeScriptTarget -PathType Container) -or
+        (Read-DreamSkinUtf8File -Path (Join-Path $activeScriptTarget 'preserve.txt')) -cne 'preserve' -or
+        (Read-DreamSkinUtf8File -Path (Join-Path $scriptPaths.Active 'theme.json')) -cne $activeConfigBeforeTargetType) {
+        throw 'A theme.js directory target was not rejected and preserved before switching.'
+      }
+    }
+  } finally {
+    Remove-Item -LiteralPath $activeScriptTarget -Recurse -Force
+    Move-Item -LiteralPath $activeScriptBackup -Destination $activeScriptTarget
+  }
+  $null = Use-DreamSkinSavedTheme -ThemeDirectory $plainInScriptState.Path -StateRoot $scriptStateRoot
+  if (Test-Path -LiteralPath (Join-Path $scriptPaths.Active 'theme.js')) { throw 'Ordinary theme switch left a stale script.' }
+  $null = Restore-DreamSkinActiveThemeSnapshot -SnapshotDirectory $scriptSnapshot `
+    -StateRoot $scriptStateRoot -ExpectedContentFingerprint $scriptSnapshotFingerprint
+  if ((Read-DreamSkinUtf8File -Path (Join-Path $scriptPaths.Active 'theme.js')) -cne $scriptText) {
+    throw 'Rollback snapshot did not restore script bytes.'
+  }
+  $orphanStateRoot = Join-Path $temporaryRoot 'orphan-script-seed-state'
+  $orphanActive = Join-Path $orphanStateRoot 'active-theme'
+  New-Item -ItemType Directory -Path $orphanActive -Force | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $orphanActive 'theme.js'), 'return;', [System.Text.UTF8Encoding]::new($false))
+  $orphanPaths = Initialize-DreamSkinThemeStore -SkillRoot $Root -StateRoot $orphanStateRoot
+  if ((Read-DreamSkinTheme -ThemeDirectory $orphanPaths.Active).ScriptPath -or
+    (Test-Path -LiteralPath (Join-Path $orphanPaths.Active 'theme.js'))) {
+    throw 'Initial ordinary theme seed retained an orphan script.'
+  }
+  $bundledPresetId = (Read-DreamSkinTheme -ThemeDirectory (Join-Path $Root 'assets')).Theme.id
+  foreach ($presetScriptId in @($bundledPresetId, 'preset-gothic-void-crusade')) {
+    $presetScriptState = Join-Path $temporaryRoot ('preset-script-state-' + $presetScriptId)
+    $presetScriptPaths = Initialize-DreamSkinThemeStore -SkillRoot $Root -StateRoot $presetScriptState
+    $presetScriptSource = Join-Path $temporaryRoot ('preset-script-source-' + $presetScriptId)
+    $presetScriptArchive = Join-Path $temporaryRoot ('preset-script-' + $presetScriptId + '.zip')
+    Write-TestOfficialThemePack -Directory $presetScriptSource -Id $presetScriptId `
+      -Name ('Script Override ' + $presetScriptId) -IncludeScript -ScriptSource $scriptText
+    New-TestZipFromDirectory -Source $presetScriptSource -Archive $presetScriptArchive
+    $presetScriptImported = Import-DreamSkinThemeZip -ArchivePath $presetScriptArchive -StateRoot $presetScriptState
+    $null = Use-DreamSkinSavedTheme -ThemeDirectory $presetScriptImported.Path -StateRoot $presetScriptState
+    $presetScriptPaths = Initialize-DreamSkinThemeStore -SkillRoot $Root -StateRoot $presetScriptState
+    foreach ($presetRefreshedDirectory in @($presetScriptPaths.Active, (Join-Path $presetScriptPaths.Saved $presetScriptId))) {
+      $presetRefreshed = Read-DreamSkinTheme -ThemeDirectory $presetRefreshedDirectory
+      if ($presetRefreshed.ScriptPath -or $presetRefreshed.Theme.PSObject.Properties['script'] -or
+        (Test-Path -LiteralPath (Join-Path $presetRefreshedDirectory 'theme.js'))) {
+        throw 'Ordinary builtin refresh retained the previous saved or active script.'
+      }
+    }
+  }
+  foreach ($seedTargetKind in @('directory', 'junction')) {
+    $seedGuardState = Join-Path $temporaryRoot ('seed-guard-' + $seedTargetKind)
+    $seedGuardPaths = Initialize-DreamSkinThemeStore -SkillRoot $Root -StateRoot $seedGuardState
+    $seedGuardDirectory = Join-Path $seedGuardPaths.Saved $bundledPresetId
+    $seedGuardTarget = Join-Path $seedGuardDirectory 'theme.js'
+    $seedGuardConfig = Read-DreamSkinUtf8File -Path (Join-Path $seedGuardDirectory 'theme.json')
+    $seedGuardMarkerRoot = if ($seedTargetKind -ceq 'junction') {
+      Join-Path $temporaryRoot 'seed-junction-target'
+    } else { $seedGuardTarget }
+    New-Item -ItemType Directory -Path $seedGuardMarkerRoot | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $seedGuardMarkerRoot 'preserve.txt'), 'preserve')
+    if ($seedTargetKind -ceq 'junction') {
+      $null = New-Item -ItemType Junction -Path $seedGuardTarget -Target $seedGuardMarkerRoot
+    }
+    try {
+      $seedGuardRejected = $false
+      try { $null = Initialize-DreamSkinThemeStore -SkillRoot $Root -StateRoot $seedGuardState } catch { $seedGuardRejected = $true }
+      if (-not $seedGuardRejected -or
+        (Read-DreamSkinUtf8File -Path (Join-Path $seedGuardDirectory 'theme.json')) -cne $seedGuardConfig -or
+        (Read-DreamSkinUtf8File -Path (Join-Path $seedGuardMarkerRoot 'preserve.txt')) -cne 'preserve') {
+        throw 'Builtin refresh did not reject and preserve a non-file or reparse script target before metadata commit.'
+      }
+    } finally {
+      if ($seedTargetKind -ceq 'junction') { [System.IO.Directory]::Delete($seedGuardTarget) }
+    }
+  }
+  $semanticBefore = Get-DreamSkinThemeSemanticFingerprint -ThemeDirectory $scriptImported.Path
+  $runtimeBefore = Get-DreamSkinThemeRuntimeContentFingerprint -ThemeDirectory $scriptImported.Path
+  $sourceBefore = (Get-DreamSkinSourceThemeIdentity -LoadedTheme $scriptSaved).SemanticFingerprint
+  [System.IO.File]::AppendAllText($scriptSaved.ScriptPath, "`n/* changed script */", [System.Text.UTF8Encoding]::new($false))
+  if ((Get-DreamSkinThemeSemanticFingerprint -ThemeDirectory $scriptImported.Path) -ceq $semanticBefore -or
+    (Get-DreamSkinThemeRuntimeContentFingerprint -ThemeDirectory $scriptImported.Path) -ceq $runtimeBefore -or
+    (Get-DreamSkinSourceThemeIdentity -LoadedTheme (Read-DreamSkinTheme -ThemeDirectory $scriptImported.Path)).SemanticFingerprint -ceq $sourceBefore) {
+    throw 'Script-only byte changes did not invalidate every theme identity.'
+  }
+  $activeBeforeChangedScript = @(
+    Get-ChildItem -LiteralPath $scriptPaths.Active -File | Sort-Object Name | ForEach-Object {
+      $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+    }
+  ) -join '|'
+  $changedScriptError = $null
+  try {
+    $null = Use-DreamSkinSavedTheme -ThemeDirectory $scriptImported.Path -StateRoot $scriptStateRoot
+  } catch { $changedScriptError = $_.Exception.Message }
+  $activeAfterChangedScript = @(
+    Get-ChildItem -LiteralPath $scriptPaths.Active -File | Sort-Object Name | ForEach-Object {
+      $_.Name + ':' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+    }
+  ) -join '|'
+  if (-not $changedScriptError -or $changedScriptError -notmatch 'trust' -or
+    $activeBeforeChangedScript -cne $activeAfterChangedScript) {
+    throw 'Changed script bytes retained an old trust grant or altered the active script theme before rejection.'
+  }
+  $scriptMissing = Join-Path $temporaryRoot 'script-missing'
+  Write-TestOfficialThemePack -Directory $scriptMissing -Id 'missing-script' -Name 'Missing Script' -IncludeScript
+  Remove-Item -LiteralPath (Join-Path $scriptMissing 'theme.js') -Force
+  $missingScriptRejected = $false
+  try { $null = Read-DreamSkinTheme -ThemeDirectory $scriptMissing } catch { $missingScriptRejected = $true }
+  if (-not $missingScriptRejected) { throw 'Native theme reader accepted a missing declared script.' }
+  $scriptMissingArchive = Join-Path $temporaryRoot 'script-missing.zip'
+  New-TestZipFromDirectory -Source $scriptMissing -Archive $scriptMissingArchive
+  Assert-TestImportRejected -Archive $scriptMissingArchive -Label 'missing declared script'
+  foreach ($scriptCase in @(
+    @{ Name = 'empty'; Text = '' },
+    @{ Name = 'syntax'; Text = 'const = broken;' },
+    @{ Name = 'oversized'; Text = ('a' * ((6 * 1024 * 1024) + 1)) }
+  )) {
+    $invalidScriptDirectory = Join-Path $temporaryRoot ('invalid-script-' + $scriptCase.Name)
+    Write-TestOfficialThemePack -Directory $invalidScriptDirectory -Id ('script-' + $scriptCase.Name) `
+      -Name 'Invalid Script' -IncludeScript -ScriptSource $scriptCase.Text
+    $invalidScriptArchive = Join-Path $temporaryRoot ('invalid-script-' + $scriptCase.Name + '.zip')
+    New-TestZipFromDirectory -Source $invalidScriptDirectory -Archive $invalidScriptArchive
+    Assert-TestImportRejected -Archive $invalidScriptArchive -Label ('invalid script ' + $scriptCase.Name)
+  }
+  $simpleScriptSource = Join-Path $temporaryRoot 'simple-script'
+  Write-TestThemePack -Directory $simpleScriptSource -Id 'simple-script' -Name 'Simple Script'
+  [System.IO.File]::WriteAllText((Join-Path $simpleScriptSource 'theme.js'), 'return;', [System.Text.UTF8Encoding]::new($false))
+  $simpleScriptArchive = Join-Path $temporaryRoot 'simple-script.zip'
+  New-TestZipFromDirectory -Source $simpleScriptSource -Archive $simpleScriptArchive
+  Assert-TestImportRejected -Archive $simpleScriptArchive -Label 'simplified ZIP with script'
+  $undeclaredScriptRejected = $false
+  try { $null = Read-DreamSkinTheme -ThemeDirectory $simpleScriptSource } catch { $undeclaredScriptRejected = $true }
+  if (-not $undeclaredScriptRejected) { throw 'Native theme reader accepted an undeclared script.' }
+  $declarationTheme = (Read-DreamSkinUtf8File -Path (Join-Path $scriptSource 'theme.json')) | ConvertFrom-Json
+  foreach ($invalidDeclaration in @('../theme.js', 'other.js', 42, $null)) {
+    $declarationTheme.script = $invalidDeclaration
+    [System.IO.File]::WriteAllText((Join-Path $scriptSource 'theme.json'),
+      ($declarationTheme | ConvertTo-Json -Depth 8), [System.Text.UTF8Encoding]::new($false))
+    $declarationRejected = $false
+    try { $null = Read-DreamSkinTheme -ThemeDirectory $scriptSource } catch { $declarationRejected = $true }
+    if (-not $declarationRejected) { throw 'Native theme reader accepted a non-fixed script declaration.' }
+  }
+  $env:LOCALAPPDATA = $originalLocalAppData
 
   $replacementSource = Join-Path $temporaryRoot 'identity-replacement-source'
   $replacementArchive = Join-Path $temporaryRoot 'identity-replacement.zip'
@@ -1365,5 +1604,6 @@ try {
   }
   Write-Host 'PASS: Windows ZIP import is contained, bounded, atomic, deduplicated, and active-theme neutral.'
 } finally {
+  $env:LOCALAPPDATA = $originalLocalAppData
   Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

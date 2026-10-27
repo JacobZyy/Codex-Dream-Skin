@@ -320,6 +320,7 @@ function makeFixture({
   const payloadFor = (theme = {}, cssText = ".fixture { color: red; }") => {
     const template = fixture.template;
     return template
+      .replace("__DREAM_SKIN_THEME_SCRIPT__", "null")
       .replace("__DREAM_SKIN_CSS_JSON__", JSON.stringify(cssText))
       .replace("__DREAM_SKIN_ART_JSON__", JSON.stringify("data:image/png;base64,AA=="))
       .replace("__DREAM_SKIN_THEME_JSON__", JSON.stringify({ id: "fixture", appearance: "auto", ...theme }))

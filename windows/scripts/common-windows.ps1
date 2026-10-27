@@ -472,6 +472,7 @@ function Install-DreamSkinRuntimeEngine {
     'assets\safe-css-validator.mjs',
     'assets\selectors.json',
     'assets\theme-package-validator.mjs',
+    'assets\theme-script.mjs',
     'assets\theme.json',
     'presets\preset-gothic-void-crusade\background.jpg',
     'presets\preset-gothic-void-crusade\theme.json',

@@ -69,6 +69,20 @@ make_theme_json "$TMP/official-pack/theme.json"
 "$EXTRACTOR" "$TMP/official.zip" "$TMP/official-out"
 /usr/bin/cmp -s "$TMP/official-pack/manifest.json" "$TMP/official-out/manifest.json"
 
+/usr/bin/printf 'throw new Error("extractor must never execute scripts");\n' > "$TMP/official-pack/theme.js"
+(
+  cd "$TMP/official-pack"
+  /usr/bin/zip -q "$TMP/official-script.zip" manifest.json theme.json theme.css theme.js background.jpg
+)
+/bin/mkdir "$TMP/official-script-out"
+"$EXTRACTOR" "$TMP/official-script.zip" "$TMP/official-script-out"
+/usr/bin/cmp -s "$TMP/official-pack/theme.js" "$TMP/official-script-out/theme.js"
+(
+  cd "$TMP/official-pack"
+  /usr/bin/zip -q "$TMP/simple-script.zip" theme.json theme.css theme.js background.jpg
+)
+expect_rejected "$TMP/simple-script.zip" simple-script
+
 (
   cd "$TMP/official-pack"
   /usr/bin/zip -q "$TMP/official-without-css.zip" manifest.json theme.json background.jpg

@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const macosRoot = path.resolve(here, "..");
@@ -122,6 +123,25 @@ async function writeSavedTheme(directoryName, id, extra = {}, destinationRoot = 
     extra.safeCss ?? '[data-ds-part="root"] { color: var(--ds-theme-color-text); }\n',
   );
   return directory;
+}
+
+async function makeScriptStage(name, id, { quote = "SCRIPT ORIGINAL", source } = {}) {
+  const stage = await makeStage(name, id, { theme: { script: "theme.js", quote, art: { safeArea: "left", taskMode: "full" } } });
+  const script = source ?? 'throw new Error("must not execute while importing");\n/*' + "x".repeat(1_048_576) + "*/";
+  await fs.writeFile(path.join(stage, "theme.js"), script);
+  const files = [];
+  for (const [filePath, mediaType] of [["theme.json", "application/json"], ["theme.css", "text/css"], ["background.png", "image/png"], ["theme.js", "application/javascript"]]) {
+    const bytes = await fs.readFile(path.join(stage, filePath));
+    files.push({ path: filePath, mediaType, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+  }
+  await fs.writeFile(path.join(stage, "manifest.json"), JSON.stringify({
+    packageVersion: 1, skinApiVersion: 2, themeId: id, version: "1.0.0", minClientVersion: "1.5.22",
+    platforms: ["macos", "windows"], capabilities: ["background", "tokens", "safe-css", "theme-script"],
+    publisher: { id: "contract-tests", displayName: "Contract Tests" }, license: "CC0-1.0",
+    provenance: { aiGenerated: false, summary: "Theme script transaction fixture." },
+    files, createdAt: "2026-10-27T00:00:00Z",
+  }));
+  return stage;
 }
 
 async function savedThemeNames() {
@@ -680,6 +700,61 @@ try {
   badConfig.schemaVersion = 2;
   await fs.writeFile(path.join(badSchema, "theme.json"), `${JSON.stringify(badConfig)}\n`);
   await assert.rejects(publish(badSchema), /schemaVersion 1/);
+
+  const scriptThemesRoot = path.join(tempRoot, "script-themes");
+  await fs.mkdir(scriptThemesRoot);
+  const scriptStage = await makeScriptStage("script-stage", "script-theme");
+  const scriptBytes = await fs.readFile(path.join(scriptStage, "theme.js"));
+  assert.ok(scriptBytes.length > 1_048_576);
+  assert.ok((await fs.stat(path.join(scriptStage, "theme.json"))).size < 65_536);
+  const scripted = await publish(scriptStage, scriptThemesRoot);
+  assert.equal(scripted.status, "imported");
+  assert.equal(scripted.packageFormat, "official");
+  const scriptSaved = path.join(scriptThemesRoot, "script-theme");
+  assert.deepEqual((await fs.readdir(scriptSaved)).sort(), ["background.png", "theme.css", "theme.js", "theme.json"]);
+  assert.deepEqual(await fs.readFile(path.join(scriptSaved, "theme.js")), scriptBytes);
+  const scriptDuplicateStage = await makeScriptStage("script-duplicate-stage", "other-script-id");
+  const scriptDuplicate = await publish(scriptDuplicateStage, scriptThemesRoot);
+  assert.equal(scriptDuplicate.status, "duplicate");
+  assert.equal(scriptDuplicate.id, "script-theme");
+  assert.equal(scriptDuplicate.contentFingerprint, scripted.contentFingerprint);
+  const scriptChangedStage = await makeScriptStage("script-changed-stage", "script-theme", { source: scriptBytes.toString("utf8") + "\n// changed script bytes" });
+  const scriptChanged = await publish(scriptChangedStage, scriptThemesRoot);
+  assert.equal(scriptChanged.replaced, true);
+  assert.notEqual(scriptChanged.contentFingerprint, scripted.contentFingerprint);
+  const scriptRestored = await publish(scriptStage, scriptThemesRoot);
+  assert.equal(scriptRestored.contentFingerprint, scripted.contentFingerprint);
+  const ordinaryStage = await makeStage("ordinary-after-script", "script-theme");
+  assert.equal((await publish(ordinaryStage, scriptThemesRoot)).replaced, true);
+  assert.equal(await fs.access(path.join(scriptSaved, "theme.js")).then(() => true, () => false), false, "ordinary replacement removes the previous script");
+  assert.equal((await publish(scriptStage, scriptThemesRoot)).contentFingerprint, scripted.contentFingerprint);
+
+  for (const phase of ["backup", "candidate", "committed"]) {
+    const recoveryRoot = path.join(tempRoot, `script-recovery-${phase}`);
+    await fs.mkdir(recoveryRoot);
+    const original = await publish(scriptStage, recoveryRoot);
+    const replacement = await makeScriptStage(`script-replacement-${phase}`, "script-theme", { source: scriptBytes.toString("utf8") + "\n// replacement" });
+    await publishAndKill(replacement, recoveryRoot, phase);
+    assert.equal((await recover(recoveryRoot)).status, "recovered");
+    const expected = phase === "committed" ? replacement : scriptStage;
+    assert.deepEqual(await fs.readFile(path.join(recoveryRoot, "script-theme", "theme.js")), await fs.readFile(path.join(expected, "theme.js")));
+    const duplicateAfterRecovery = await publish(expected, recoveryRoot);
+    assert.equal(duplicateAfterRecovery.status, "duplicate");
+    if (phase !== "committed") assert.equal(duplicateAfterRecovery.contentFingerprint, original.contentFingerprint);
+    assert.deepEqual(await replacementTransactions(recoveryRoot), []);
+  }
+  const scriptSimple = await makeScriptStage("script-simple-stage", "script-simple");
+  await fs.unlink(path.join(scriptSimple, "manifest.json"));
+  await assert.rejects(publish(scriptSimple, scriptThemesRoot), /require manifest\.json/);
+  const scriptUndeclared = await makeScriptStage("script-undeclared-stage", "script-undeclared");
+  const scriptUndeclaredTheme = JSON.parse(await fs.readFile(path.join(scriptUndeclared, "theme.json")));
+  delete scriptUndeclaredTheme.script;
+  await fs.writeFile(path.join(scriptUndeclared, "theme.json"), JSON.stringify(scriptUndeclaredTheme));
+  await assert.rejects(publish(scriptUndeclared, scriptThemesRoot), /declaration/);
+  const scriptMissing = await makeScriptStage("script-missing-stage", "script-missing");
+  await fs.unlink(path.join(scriptMissing, "theme.js"));
+  await assert.rejects(publish(scriptMissing, scriptThemesRoot), /declaration|missing/);
+  assert.deepEqual((await fs.readdir(scriptThemesRoot)).sort(), ["script-theme"]);
 
   assert.equal(await fs.readFile(path.join(activeRoot, "last-known-good"), "utf8"), "unchanged\n");
   assert.deepEqual(await transactionResidue(), []);

@@ -16,6 +16,14 @@ This file is an optional Codex capability entry. The delivery is a complete stan
 4. Verify the live result with `Verify Codex Dream Skin.command`. A pass requires a visible native sidebar and composer, no horizontal overflow, non-interactive decoration, and—on the home route—a continuous wallpaper with live native heading, project controls, and any suggestion cards exposed by the current Codex version.
 5. Restore the official appearance with `Restore Codex Dream Skin.command`.
 
+### Optional trusted local scripts (this fork, client 1.5.22+)
+
+- A theme may opt in with `"script": "theme.js"` while keeping `schemaVersion: 1`. Its manifest must register the script's application/javascript media type, bytes and SHA-256, use Skin API 2, declare `theme-script`, and require client 1.5.22 or newer. Simplified three-file ZIPs cannot carry scripts.
+- Import only saves. Review the complete script before explicitly granting its exact SHA-256 with `node scripts/injector.mjs --trust-theme-script --theme-dir <reviewed-saved-theme-directory>` from this platform directory. The grant command does not execute it. Do not infer authorization to trust third-party scripts from an import or selection request; changed bytes require a new grant.
+- Select the saved theme after trust. Scripts run once per generation; A → B → A cleans up and remounts, reload mounts again, and Restore aborts the script and runs its registered cleanup. A returned promise must settle successfully before verification can report ready.
+- Scripts can access the page and chat content; this API is not a sandbox. Authors must register every resource with `api.onCleanup` and guard asynchronous work with `api.signal`.
+- The current upstream client and online gallery/Studio do not support this extension. See [`docs/theme-scripts.md`](../docs/theme-scripts.md) and the [fork Releases](https://github.com/JacobZyy/Codex-Dream-Skin/releases) for compatible builds; do not describe local testing as a public release.
+
 ## Guardrails
 
 - Never modify the official `.app`, `app.asar`, or its code signature.

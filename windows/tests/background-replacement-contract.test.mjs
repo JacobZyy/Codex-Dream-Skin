@@ -23,6 +23,7 @@ test("Windows Change Background preserves the active theme contract", () => {
     replacement,
     /Set-DreamSkinActiveTheme -ImagePath \$ImagePath -Theme \$theme[\s\S]*-SafeCssPath \$safeCssPath/,
   );
+  assert.match(replacement, /-ScriptPath \$current\.ScriptPath/);
 
   assert.match(
     traySource,
@@ -32,4 +33,21 @@ test("Windows Change Background preserves the active theme contract", () => {
     traySource,
     /Set-DreamSkinActiveTheme -ImagePath \$dialog\.FileName -Theme \$null/,
   );
+});
+
+test("Windows script candidates require trust before active files are published", () => {
+  const setter = functionBody(themeSource, "Set-DreamSkinActiveTheme");
+  const trustCheck = setter.indexOf("'--require-script-trust'");
+  assert.ok(trustCheck > 0);
+  for (const publication of [
+    "Move-Item -LiteralPath $temporary -Destination $target",
+    "Move-Item -LiteralPath $temporaryCss -Destination $activeCss",
+    "Move-Item -LiteralPath $temporaryScript -Destination $activeScript",
+    "Write-DreamSkinTheme -ThemeDirectory $paths.Active",
+  ]) assert.ok(setter.indexOf(publication) > trustCheck, publication);
+  assert.match(setter, /\.theme-apply-check-/);
+  assert.match(setter, /Write-DreamSkinTheme -ThemeDirectory \$scriptCheckStage -Theme \$candidateTheme/);
+  assert.match(setter, /\$temporary = \$candidateImage/);
+  assert.match(setter, /\$temporaryScript = \$candidateScript/);
+  assert.match(setter, /Remove-DreamSkinManagedDirectoryVerified -Path \$scriptCheckStage/);
 });
