@@ -1499,7 +1499,7 @@ async function runOneShot(options) {
         if (options.reload) {
           await session.send("Page.reload", { ignoreCache: true });
           await new Promise((resolve) => setTimeout(resolve, 1600));
-          if (options.mode !== "remove") {
+          if (options.mode === "once") {
             if (operationToken) {
               await presentOperationUi(
                 session, operationToken, "loading",

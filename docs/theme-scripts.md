@@ -74,6 +74,8 @@ Trust registry: exact object `{schemaVersion:1,scripts:[sha256,...]}`, at most12
 
 The canonical renderer contains `__DREAM_SKIN_THEME_SCRIPT__`, replaced by the injector with null or `function(api){<validated source>}`. It is never evaluated by the Node loader. The serializable `state.script` status has `state` (loading/ready/error/disposed), `sha256`, and an optional generic error code; `state.hasThemeScript` reflects presence. Expose a `cleanupScript` callback for the existing removal fallback. No second watcher and no theme-specific code in the tool.
 
+`--verify --reload` reloads the page and checks automatic remounting by the running watcher; it never reapplies the payload itself. Without automatic remounting verification fails. `--once --reload` retains explicit apply behavior.
+
 Both platforms must include theme.js in declared resource copying, fingerprints, saved replacement, active snapshots/rollback and watcher stamps. A->B->A, reload and restore must replay or remove it correctly. Existing ordinary themes must remain unaffected.
 
 The public upstream client and DreamSkin.cc gallery/Studio do not currently implement this new capability. Use a compatible build from [this fork](https://github.com/JacobZyy/Codex-Dream-Skin); the [fork's Releases page](https://github.com/JacobZyy/Codex-Dream-Skin/releases) is the source of truth for available installers. Local implementation, trusted installation and tests do not imply a public release or online support for executable theme packages. Older clients must reject a package requiring Skin API 2 / client 1.5.22 rather than claim a partially applied result.
