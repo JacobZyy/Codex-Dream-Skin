@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 import { decodeThemeScript, readThemeScript, isThemeScriptTrusted, trustThemeScript, MAX_THEME_SCRIPT_BYTES } from "../runtime/theme-script.mjs";
 import * as mac from "../macos/scripts/injector.mjs";
 import * as win from "../windows/scripts/injector.mjs";
@@ -104,7 +105,28 @@ test("unexpected script and declared missing/invalid paths fail", async (t) => {
   for (const loader of [mac, win]) await assert.rejects(loader.loadTheme(directory), /is missing/);
 });
 
- test("theme script source containing template-like text remains verbatim", async (t) => {
+test("ordinary theme metadata may contain the script slot text verbatim", async (t) => {
+  const { directory } = await fixture(t);
+  const configPath = path.join(directory, "theme.json");
+  const raw = JSON.parse(await fs.readFile(configPath));
+  raw.name = "__DREAM_SKIN_THEME_SCRIPT__";
+  delete raw.script;
+  await fs.writeFile(configPath, JSON.stringify(raw));
+  await fs.unlink(path.join(directory, "theme.js"));
+  const payloads = await Promise.all([mac.loadPayload(directory), win.loadPayload(directory)]);
+  for (const loaded of payloads) {
+    assert.equal(loaded.script, null);
+    assert.equal(loaded.theme.name, raw.name);
+    const marker = "((cssText, artDataUrl, themeConfig) => {";
+    assert.ok(loaded.payload.includes(marker));
+    const probe = loaded.payload.replace(marker, () => `${marker}\nreturn themeConfig;`);
+    const captured = vm.runInNewContext(probe, Object.create(null), { timeout: 1000 });
+    assert.equal(captured.name, raw.name, "the real renderer argument retains the ordinary theme name");
+    assert.equal(Object.hasOwn(captured, "script"), false);
+  }
+});
+
+test("theme script source containing template-like text remains verbatim", async (t) => {
   const { directory, trustFile } = await fixture(t);
   const source = 'const marker = "__DREAM_SKIN_THEME_JSON__ __DREAM_SKIN_THEME_SCRIPT__ $&"; return;';
   await fs.writeFile(path.join(directory, "theme.js"), source);

@@ -830,6 +830,9 @@ export async function loadPayload(themeDir, preferenceOptions = {}, scriptOption
     loadTheme(themeDir, preferenceOptions, scriptOptions),
   ]);
   const { css, template } = staticAssets;
+  if ((template.match(/__DREAM_SKIN_THEME_SCRIPT__/g) ?? []).length !== 1) {
+    throw new Error("Renderer template must contain exactly one theme script slot");
+  }
   const { art, extension, safeCssRuntime, safeCssStatus, theme, script } = loaded;
   const combinedCss = safeCssRuntime ? `${css}\n${safeCssRuntime}\n` : css;
   const styleRevision = createHash("sha256").update(combinedCss).digest("hex").slice(0, 20);
@@ -880,7 +883,7 @@ export async function loadPayload(themeDir, preferenceOptions = {}, scriptOption
 // Fail closed before a payload can reach the renderer. Theme display fields are
 // attacker-influenced text, so template substitution is verified structurally
 // instead of trusting any single sanitiser:
-//   1. no placeholder token may survive substitution;
+//   1. no JSON placeholder token may survive substitution;
 //   2. the payload must still parse as the standalone expression that
 //      Runtime.evaluate would receive.
 // The second assertion is deliberately generic: it catches any corruption of
@@ -889,7 +892,7 @@ export async function loadPayload(themeDir, preferenceOptions = {}, scriptOption
 export function assertPayloadIntegrity(payload, scriptSource = null) {
   const integrityPayload = scriptSource === null ? payload
     : payload.replace(`function(api) {\n${scriptSource}\n}`, "null");
-  if (/__DREAM_SKIN_(?:[A-Z0-9_]+_JSON|THEME_SCRIPT)__/.test(integrityPayload)) {
+  if (/__DREAM_SKIN_[A-Z0-9_]+_JSON__/.test(integrityPayload)) {
     throw new Error("Payload placeholders were not fully replaced");
   }
   try {
@@ -1760,7 +1763,7 @@ async function runWatch(options) {
       await Promise.race([
         completed,
         new Promise((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("Renderer setup did not quiesce for pause")), timeoutMs);
+          timeout = setTimeout(() => reject(new Error("Renderer setup did not quiesce")), timeoutMs);
         }),
       ]);
     } finally {
@@ -1845,12 +1848,14 @@ async function runWatch(options) {
 
   const refreshPayload = async () => {
     const refreshEpoch = mutationEpoch;
+    const isCurrentRecord = (id, record) => !controlOnly && mutationEpoch === refreshEpoch
+      && sessions.get(id) === record && record.codexReady && !record.session.closed;
     let next;
     try {
       next = await loadPayload(options.themeDir);
     } catch (error) {
-      await Promise.all([...sessions.values()].map(async (record) => {
-        if (record.session.closed) return;
+      await Promise.all([...sessions.entries()].map(async ([id, record]) => {
+        if (!isCurrentRecord(id, record)) return;
         const externalOperation = activeOperation;
         const operationToken = externalOperation?.token ?? nextOperationToken();
         record.operationToken = operationToken;
@@ -1865,56 +1870,68 @@ async function runWatch(options) {
       throw error;
     }
     if (next.revision === current.revision) return;
+    if (!controlOnly && mutationEpoch === refreshEpoch) {
+      await waitForTargetSetups(options.timeoutMs);
+    }
     current = next;
     if (controlOnly || mutationEpoch !== refreshEpoch) {
       console.log(`[dream-skin] staged theme ${current.theme.id} while skin is paused`);
       return;
     }
-    for (const record of sessions.values()) {
+    for (const [id, record] of [...sessions.entries()]) {
       const { session } = record;
-      if (session.closed) continue;
+      if (!isCurrentRecord(id, record)) continue;
       const externalOperation = activeOperation;
       const operationToken = externalOperation?.token ?? nextOperationToken();
       record.operationToken = operationToken;
       record.operationExternal = Boolean(externalOperation);
+      let nextIdentifier = null;
       try {
         await presentOperationUi(
           session, operationToken, "loading", `正在应用「${current.theme.name}」…`,
         );
-        if (controlOnly || mutationEpoch !== refreshEpoch) continue;
-        const nextIdentifier = await registerEarlyForRecord(
+        if (!isCurrentRecord(id, record)) continue;
+        nextIdentifier = await registerEarlyForRecord(
           record, current.payload, current.revision,
         );
-        if (controlOnly || mutationEpoch !== refreshEpoch) {
-          await removeEarlyIdentifier(record, nextIdentifier);
-          continue;
-        }
+        if (!isCurrentRecord(id, record)) continue;
         if (record.earlyScriptId) {
           await removeEarlyIdentifier(record, record.earlyScriptId);
+          if (!isCurrentRecord(id, record)) continue;
         }
         record.earlyScriptId = nextIdentifier;
         record.needsLoadFallback = !nextIdentifier;
         await applyToSession(session, current.payload);
-        if (controlOnly || mutationEpoch !== refreshEpoch) continue;
+        if (!isCurrentRecord(id, record)) continue;
         const verification = await waitForVerifiedSession(
           session,
           Math.min(options.timeoutMs, 8000),
           current.theme.id,
           current.revision,
         );
+        if (!isCurrentRecord(id, record)) continue;
         if (!verification?.pass) throw new Error("Theme refresh verification failed");
         if (!externalOperation) {
           await presentOperationUi(session, operationToken, "success", `已应用「${current.theme.name}」`);
+          if (!isCurrentRecord(id, record)) continue;
         }
       } catch (error) {
+        if (!isCurrentRecord(id, record)) continue;
         record.needsLoadFallback = true;
         if (!externalOperation) {
           await presentOperationUi(session, operationToken, "error", "主题切换失败，未确认应用");
+          if (!isCurrentRecord(id, record)) continue;
         }
         console.error(`[dream-skin] theme refresh failed: ${error.message}`);
+      } finally {
+        if (nextIdentifier && !isCurrentRecord(id, record)) {
+          await removeEarlyIdentifier(record, nextIdentifier);
+        }
       }
     }
-    console.log(`[dream-skin] refreshed theme ${current.theme.id} (${current.timings.buildMs}ms)`);
+    if (!controlOnly && mutationEpoch === refreshEpoch) {
+      console.log(`[dream-skin] refreshed theme ${current.theme.id} (${current.timings.buildMs}ms)`);
+    }
   };
 
   const queuePayloadRefresh = ({ staticChanged = false } = {}) => {
@@ -2071,6 +2088,7 @@ async function runWatch(options) {
           session = await connectTarget(target, options.port);
           record = {
             session,
+            codexReady: false,
             earlyScriptId: null,
             earlyScriptIds: new Set(),
             needsLoadFallback: false,
@@ -2168,7 +2186,13 @@ async function runWatch(options) {
             current.theme.id,
             current.revision,
           );
+          if (sessions.get(target.id) !== record || session.closed) continue;
+          if (controlOnly || mutationEpoch !== connectionEpoch) {
+            await invalidateEarly(record);
+            continue;
+          }
           if (!verification?.pass) throw new Error("Initial theme verification failed");
+          record.codexReady = true;
           if (recoveryOperation && !activeOperation
             && pauseRecovery?.token === recoveryOperation.token) {
             await presentOperationUi(

@@ -654,6 +654,9 @@ export async function loadPayload(themeDir = path.join(root, "assets"), candidat
     fs.readFile(path.join(root, "assets", "dream-skin.css"), "utf8"),
     fs.readFile(path.join(root, "assets", "renderer-inject.js"), "utf8"),
   ]);
+  if ((template.match(/__DREAM_SKIN_THEME_SCRIPT__/g) ?? []).length !== 1) {
+    throw new Error("Renderer template must contain exactly one theme script slot");
+  }
   const combinedCss = loadedTheme.safeCssRuntime
     ? `${css}\n${loadedTheme.safeCssRuntime}\n` : css;
   const extension = path.extname(loadedTheme.imagePath).toLowerCase();
@@ -689,7 +692,7 @@ export async function loadPayload(themeDir = path.join(root, "assets"), candidat
   // syntax outright, so refuse to hand a corrupted script to the renderer.
   const integrityPayload = loadedTheme.script
     ? payload.replace(`function(api) {\n${loadedTheme.script.source}\n}`, "null") : payload;
-  if (/__DREAM_SKIN_(?:[A-Z0-9_]+_JSON|THEME_SCRIPT)__/.test(integrityPayload)) {
+  if (/__DREAM_SKIN_[A-Z0-9_]+_JSON__/.test(integrityPayload)) {
     throw new Error("Payload placeholders were not fully replaced");
   }
   try {
